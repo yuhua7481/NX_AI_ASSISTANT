@@ -1,0 +1,18 @@
+NXOpen runtime: NXOpen, Version=2512.0.0.0, Culture=neutral, PublicKeyToken=null
+NXOpen location: D:\Program Files\Siemens\DesigncenterNX2512\nxbin\managed_core\NXOpen.dll
+CoreCLR runtime version: 8.0.31
+NXOpen ALC: D:\Program Files\Siemens\DesigncenterNX2512\nxbin\managed_core\NXOpen.Utilities.dll
+Loading plugin host: D:\AI\NX_AI_ASSISTANT\deploy\nxai_custom\application\NXAI.Assistant.NxHost.NX2512.dll
+Loaded: NXAI.Assistant.NxHost.NX2512, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
+From: D:\AI\NX_AI_ASSISTANT\deploy\nxai_custom\application\NXAI.Assistant.NxHost.NX2512.dll
+Plugin ALC: NXAI-Validation
+Opening (read-only, never saved): D:\NX_MCP_WORKSPACE\TEST001.prt
+Snapshot type: NXAI.Assistant.Core.WorkPartSnapshot
+  HasActivePart = True
+  DisplayName = TEST001
+  FullPath = D:\NX_MCP_WORKSPACE\TEST001.prt
+  Units = Millimeters
+  StatusMessage = 已从当前 NX 会话读取活动工作部件。
+NXOpen identity pre-call: False; post-call: True
+Session display part is D:\NX_MCP_WORKSPACE\TEST001.prt
+RESULT: OK

@@ -1,0 +1,38 @@
+{
+  "probeTimeUtc": "2026-10-13T03:48:27.1393801+00:00",
+  "nxRoot": "D:\\Program Files\\Siemens\\DesigncenterNX2512",
+  "ugiiBaseDirExists": true,
+  "ugiiNxopenDotnetCoreMajorVersion": "8",
+  "nxOpen.managed": {
+    "path": "D:\\Program Files\\Siemens\\DesigncenterNX2512\\NXBIN\\managed\\NXOpen.dll",
+    "assemblyVersion": "2512.0.0.0",
+    "targetFramework": null,
+    "architecture": "msil"
+  },
+  "nxOpenUf.managed": {
+    "path": "D:\\Program Files\\Siemens\\DesigncenterNX2512\\NXBIN\\managed\\NXOpen.UF.dll",
+    "assemblyVersion": "2512.1700.0.0",
+    "targetFramework": null,
+    "architecture": "msil"
+  },
+  "nxOpen.managedCore": {
+    "path": "D:\\Program Files\\Siemens\\DesigncenterNX2512\\NXBIN\\managed_core\\NXOpen.dll",
+    "assemblyVersion": "2512.0.0.0",
+    "targetFramework": ".NETCoreApp,Version=v8.0",
+    "architecture": "x64"
+  },
+  "nxOpenUf.managedCore": {
+    "path": "D:\\Program Files\\Siemens\\DesigncenterNX2512\\NXBIN\\managed_core\\NXOpen.UF.dll",
+    "assemblyVersion": "2512.1700.0.0",
+    "targetFramework": ".NETCoreApp,Version=v8.0",
+    "architecture": "x64"
+  },
+  "netCoreAppRuntimes": [
+    "8.0.15",
+    "8.0.31"
+  ],
+  "windowsDesktopRuntimes": [
+    "8.0.15",
+    "8.0.31"
+  ]
+}

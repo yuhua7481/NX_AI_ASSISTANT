@@ -48,13 +48,18 @@ foreach ($rel in $payload) {
 }
 
 if ($Sign) {
+    # SignDotNet requires the assembly to carry an "NX resource bundle"
+    # (added by Siemens' NXOpen project wizard). This machine's NX2512 has been
+    # observed loading unsigned .NET assemblies (legacy add-in evidence), so
+    # signing is a fallback for environments that refuse unsigned DLLs.
+    # See docs/TECHNICAL_SPIKE_RESULTS.md section 3 and docs/PHASE_0_REPORT.md.
     $signTool = Join-Path $nxRoot 'NXBIN\SignDotNet.exe'
     if (-not (Test-Path $signTool)) { throw "SignDotNet.exe not found: $signTool" }
     Write-Host '== signing with NX SignDotNet =='
     foreach ($rel in $payload) {
         $dll = Join-Path $deployDir (Split-Path -Leaf $rel)
         & $signTool $dll
-        if ($LASTEXITCODE -ne 0) { throw "SignDotNet failed for $dll" }
+        if ($LASTEXITCODE -ne 0) { throw "SignDotNet failed for $dll (does the assembly have the NX resource bundle?)" }
     }
 }
 else {

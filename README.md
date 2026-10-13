@@ -14,13 +14,32 @@
 
 ## 当前阶段
 
-第一阶段仅调查真实 NX2512 插件加载与运行时要求，并完成最小插件原型。详见 `docs/PHASE_0_TASK.md`。
+阶段 0（插件壳 + 活动零件读取）已实现并完成真实 NX2512 进程内验证（run_journal 只读验证：插件加载、NXOpen .NET 8 单一类型宇宙、活动部件名称/路径/单位读取）。交互式 GUI 入口验收步骤见 `docs\PHASE_0_REPORT.md` §5。技术事实与证据分级见 `docs\TECHNICAL_SPIKE_RESULTS.md`。
+
+快速构建/测试/部署：
+
+```powershell
+dotnet build NXAIAssistant.sln -c Release
+dotnet test tests\NXAI.Assistant.Tests -c Release
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+架构分层（版本升级边界）：
+
+- `src\NXAI.Assistant.Core` — 共享模型/契约，不引用 NXOpen
+- `src\NXAI.Assistant.UI` — WinForms modeless 聊天窗壳，不引用 NXOpen
+- `src\NXAI.Assistant.NxHost.NX2512` — 唯一引用 NXOpen（`NXBIN\managed_core`，.NET 8）的宿主适配层
+- `src\NXAI.Assistant.Entry` — MenuScript 入口 shim（`ACTIONS NXAI.Assistant.Entry.dll` → `static Main()`）
+- `tools\NxCompatProbe` — 版本/运行时只读探测器（安装器复用）
+- `deploy\nxai_custom` — custom directory（菜单 + DLL），由 `deploy\nxai_custom_dirs.dat` 挂接
 
 ## 建议目录
 
 - `src/`：全新源代码
 - `tests/`：可重复测试
 - `docs/`：需求、架构、阶段验收
-- `tools/installer/`：后续安装包脚本
+- `tools/`：探测/验证工具（`tools\installer` 留给后续安装包）
+- `artifacts/`：验证运行证据（journal 输出、探测 JSON）
 - `samples/`：安全的测试用零件或示例
 - `references/`：仅存放 API 资料、记录和摘要，不放旧项目复制来的实现代码
+- `deploy/`：NX custom directory 部署产物（菜单、DLL、目录清单）
