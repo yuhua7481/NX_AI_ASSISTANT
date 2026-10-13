@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!--
+      MenuScript convention (NX2512 shipped plugins, e.g. SIMULATION/magnet):
+        ACTIONS NXAI.Assistant.Entry.dll
+      NX loads the assembly named <fully-qualified-class>.dll from the custom
+      directory's application folder and invokes the class's static Main().
+      The assembly name below MUST equal namespace + "." + class name.
+    -->
+    <AssemblyName>NXAI.Assistant.Entry</AssemblyName>
+    <RootNamespace>NXAI.Assistant</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NXAI.Assistant.NxHost.NX2512\NXAI.Assistant.NxHost.NX2512.csproj" />
+  </ItemGroup>
+
+</Project>

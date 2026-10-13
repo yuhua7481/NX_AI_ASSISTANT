@@ -1,0 +1,21 @@
+# Build outputs
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+
+# Local secrets / user config
+appsettings.local.json
+secrets.json
+*.pfx
+*.p12
+
+# Logs / transient
+logs/
+*.log
+*.tmp
+
+# Local NX test parts (keep shared samples under samples deliberately)
+*.prt
+*.prt.*

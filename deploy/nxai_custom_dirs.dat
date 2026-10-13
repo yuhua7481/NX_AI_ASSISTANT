@@ -1,0 +1,10 @@
+#  NX AI Assistant custom directories file
+#
+#  Point the user environment variable UGII_CUSTOM_DIRECTORY_FILE at this
+#  file so NX loads the NX AI Assistant custom directory at startup.
+#  This file deliberately keeps the legacy NX_MCP custom directory listed
+#  so existing deployments keep working; the legacy project itself is not
+#  modified. Directories must be listed one per line with nothing else
+#  on the line (NX custom_dirs.dat format).
+D:\AI\NX_MCP\nx_custom
+D:\AI\NX_AI_ASSISTANT\deploy\nxai_custom

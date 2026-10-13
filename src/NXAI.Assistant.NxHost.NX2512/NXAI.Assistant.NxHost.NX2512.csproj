@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!--
+      NX2512 compatibility profile:
+      - Host runtime: .NET 8 (NXBIN/nxclrldr.dll + UGII_NXOPEN_DOTNET_CORE_MAJOR_VERSION=8
+        in UGII/ugii_env_ug.dat; machine has Microsoft.NETCore.App 8.0.31 and
+        Microsoft.WindowsDesktop.App 8.0.31).
+      - NXOpen assemblies: NXBIN/managed_core (NXOpen v2512.0.0.0, Amd64, net8.0).
+      - Do NOT mix managed/ (.NET Framework 4.x, MSIL) assemblies into this build.
+      - Private=false: NX provides NXOpen assemblies at runtime from its own load
+        context; copying them next to the plugin would load them out of context.
+      Future NX releases must reference their own managed_core assemblies and be
+      rebuilt + validated separately (see docs/VERSION_COMPATIBILITY_AND_UPDATES.md).
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="NXOpen">
+      <HintPath>D:\Program Files\Siemens\DesigncenterNX2512\NXBIN\managed_core\NXOpen.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NXOpen.UF">
+      <HintPath>D:\Program Files\Siemens\DesigncenterNX2512\NXBIN\managed_core\NXOpen.UF.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NXOpenUI">
+      <HintPath>D:\Program Files\Siemens\DesigncenterNX2512\NXBIN\managed_core\NXOpenUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NXOpen.Utilities">
+      <HintPath>D:\Program Files\Siemens\DesigncenterNX2512\NXBIN\managed_core\NXOpen.Utilities.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NXAI.Assistant.Core\NXAI.Assistant.Core.csproj" />
+    <ProjectReference Include="..\NXAI.Assistant.UI\NXAI.Assistant.UI.csproj" />
+  </ItemGroup>
+
+</Project>

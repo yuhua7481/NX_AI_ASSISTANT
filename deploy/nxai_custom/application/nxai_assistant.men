@@ -1,0 +1,26 @@
+!
+! NX AI Assistant - main menu entry
+!
+! Deployed as a custom directory (see deploy/nxai_custom_dirs.dat).
+! The ACTIONS convention follows NX2512's own shipped .NET plugins
+! (e.g. SIMULATION/magnet/application/sc_magnet_sfem.men):
+!   ACTIONS <fully-qualified-class>.dll
+! NX loads NXAI.Assistant.Entry.dll from this application folder and
+! invokes NXAI.Assistant.Entry.Main() on the NX UI thread.
+!
+VERSION 130
+
+EDIT UG_GATEWAY_MAIN_MENUBAR
+
+MENU UG_TOOLBOX
+   CASCADE_BUTTON NXAI_ASSISTANT_MENU
+   LABEL AI &Assistant
+   MESSAGE NX AI Assistant plugin commands.
+END_OF_MENU
+
+MENU NXAI_ASSISTANT_MENU
+   BUTTON NXAI_ASSISTANT_OPEN
+   LABEL AI Assistant &Chat
+   MESSAGE Opens the NX AI Assistant modeless chat window.
+   ACTIONS NXAI.Assistant.Entry.dll
+END_OF_MENU
