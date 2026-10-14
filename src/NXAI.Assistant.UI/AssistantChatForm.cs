@@ -12,6 +12,7 @@ public sealed class AssistantChatForm : Form
 {
     private readonly IActivePartReader _partReader;
     private readonly ChatLog _chatLog = new();
+    private readonly ModelService _modelService = new();
 
     private readonly ListBox _messageList;
     private readonly TextBox _inputBox;

@@ -1,12 +1,14 @@
 !
 ! NX AI Assistant - main menu entry
 !
-! Deployed as a custom directory (see deploy/nxai_custom_dirs.dat).
+! Source file; build.ps1 deploys it into the custom directory's startup
+! folder (deploy/nxai_custom/startup) so NX2512 registers it on the main
+! menubar at startup (see deploy/nxai_custom_dirs.dat).
 ! The ACTIONS convention follows NX2512's own shipped .NET plugins
 ! (e.g. SIMULATION/magnet/application/sc_magnet_sfem.men):
 !   ACTIONS <fully-qualified-class>.dll
-! NX loads NXAI.Assistant.Entry.dll from this application folder and
-! invokes NXAI.Assistant.Entry.Main() on the NX UI thread.
+! NX loads NXAI.Assistant.Entry.dll from the custom directory's application
+! folder and invokes NXAI.Assistant.Entry.Main() on the NX UI thread.
 !
 VERSION 130
 

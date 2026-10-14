@@ -52,3 +52,62 @@ Build a self-contained Siemens NX2512 in-process AI assistant plugin. The user o
 4. For NX-dependent behavior, explicitly distinguish mock tests from real NX acceptance.
 5. Back up or preserve user data; no destructive cleanup, reset, or commit unless asked.
 6. Report file changes, commands run, exact results, and remaining unverified assumptions.
+
+
+
+## AI 开发执行约束
+
+### 项目架构
+
+* 目标平台：Siemens Designcenter NX2512。
+* 直接在 NX 进程内使用 NXOpen 操作当前会话。
+* UI 使用 WinForms（2026-10-14 定案），不再继续 WPF 迁移；不引入 WPF，不再实施 WindowsBase 加载器实验。
+* 现代化界面通过 WinForms 自绘、统一样式、圆角卡片和现代布局实现。
+* 不引入 MCP、GUI Bridge、外部建模进程或额外后台服务。
+* 保留现有 NX 菜单入口、单实例窗口和活动工作部件读取能力。
+
+### 工作目录与 Git
+
+* 开始任务时先确认当前工作目录、分支及 Git 状态。
+* 主项目目录为 D:\AI\NX_AI_ASSISTANT。
+* 不得把独立 Worktree 当成主项目目录。
+* 不覆盖、重置或丢弃已有修改。
+* 未经明确授权，不提交 Git、不合并分支。
+
+### 降低模型重复分析
+
+* 先阅读本任务直接涉及的文件，不默认扫描整个仓库。
+* 修改前先检查相关项目文件及调用关系。
+* 仅在确有必要时读取额外文件，并说明原因。
+* 不重复分析已经验证过的模块。
+* 不输出冗长的计划和重复总结，优先执行明确的小任务。
+
+
+## AI 分析效率约束
+
+1. 任务开始后，只读取完成该任务必需的文件，不默认扫描整个仓库。
+2. 优先检查当前模块的项目文件、目标源文件和直接调用者。
+3. 不重复读取已经确认且没有变化的文件。
+4. 需要扩大读取范围时，先说明具体原因。
+5. 不输出冗长的思考过程、重复计划或与任务无关的架构分析。
+6. 优先直接实施范围明确的修改，并尽早给出可检查的差异。
+7. 一轮只完成一个目标；修改、构建、测试和 NX 实测分别执行。
+8. 如果持续思考但没有可见进展，应停止当前任务，检查已完成的工作，而不是重新扫描项目。
+
+### 任务执行
+
+* 一轮只完成一个明确目标。
+* 修改、构建、测试、NX 实测分开进行。
+* 未经要求，不同时实现多个新功能。
+* 遇到异常先报告实际错误，不自行扩大修改范围。
+* 如果长时间没有可见进展，停止并汇报当前状态。
+* 每轮报告修改文件、验证结果和遗留问题。
+
+
+### 当前开发顺序
+
+1. 在真实 NX2512 中验证恢复后的 WinForms 窗口（单实例、无模式、活动部件读取与刷新）。
+2. 现代化界面改造（WinForms 自绘、统一样式、圆角卡片、现代布局）。
+3. 开发聊天输入与消息展示。
+4. 开发文件附件。
+5. 接入独立可配置的模型 API。

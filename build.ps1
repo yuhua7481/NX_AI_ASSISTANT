@@ -21,6 +21,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 $deployDir = Join-Path $repoRoot 'deploy\nxai_custom\application'
+$startupDir = Join-Path $repoRoot 'deploy\nxai_custom\startup'
+$menuSrc = Join-Path $repoRoot 'src\NXAI.Assistant.Entry\nxai_assistant.men'
 $nxRoot = 'D:\Program Files\Siemens\DesigncenterNX2512'
 
 Write-Host "== NX AI Assistant build ($Configuration) =="
@@ -45,6 +47,19 @@ foreach ($rel in $payload) {
     $src = Join-Path $repoRoot ($rel -replace 'Release', $Configuration)
     Copy-Item -LiteralPath $src -Destination $deployDir -Force
     Write-Host "  copied: $(Split-Path -Leaf $rel)"
+}
+
+# MenuScript: main-menubar menus load from the custom directory's startup
+# folder; action DLLs are resolved from its application folder.
+New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
+Copy-Item -LiteralPath $menuSrc -Destination $startupDir -Force
+Write-Host "  copied: nxai_assistant.men -> startup"
+
+# A menu copy left in application\ would make NX load the same menu twice.
+$staleMenu = Join-Path $deployDir 'nxai_assistant.men'
+if (Test-Path -LiteralPath $staleMenu) {
+    Remove-Item -LiteralPath $staleMenu -Force
+    Write-Host "  removed stale menu from application\"
 }
 
 if ($Sign) {

@@ -29,7 +29,7 @@
 |---|---|
 | `tools\NxCompatProbe\Program.cs` | NX 安装/运行时只读探测器（JSON 输出），未来安装器复用 |
 | `tools\NxLoadValidation\NxLoadValidation.cs` | 真实 NX 进程内加载验证 journal（run_journal 验证工具，非产品路径） |
-| `deploy\nxai_custom\application\nxai_assistant.men` | 菜单定义（Toolbox → AI Assistant → AI Assistant Chat，`ACTIONS NXAI.Assistant.Entry.dll`） |
+| `src\NXAI.Assistant.Entry\nxai_assistant.men` | 菜单定义源文件（Toolbox → AI Assistant → AI Assistant Chat，`ACTIONS NXAI.Assistant.Entry.dll`）；build.ps1 部署到 `deploy\nxai_custom\startup\` |
 | `deploy\nxai_custom\application\*.dll` | 构建输出：Core / UI / NxHost.NX2512 / Entry（4 个程序集） |
 | `deploy\nxai_custom_dirs.dat` | custom 目录清单（保留旧项目目录 + 新增本项目目录；旧项目本身未改动） |
 | `build.ps1` | 构建 + 复制到 deploy + 可选 `-Test` / `-Sign` |

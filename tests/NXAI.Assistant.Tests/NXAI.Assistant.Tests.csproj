@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows7.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>12</LangVersion>
@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\NXAI.Assistant.Core\NXAI.Assistant.Core.csproj" />
+    <ProjectReference Include="..\..\src\NXAI.Assistant.NxHost.NX2512\NXAI.Assistant.NxHost.NX2512.csproj" />
   </ItemGroup>
 
 </Project>
