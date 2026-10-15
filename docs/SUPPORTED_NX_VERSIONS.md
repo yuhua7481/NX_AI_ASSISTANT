@@ -4,7 +4,7 @@
 
 | NX/Designcenter release | Host runtime | NXOpen assembly fingerprint | Adapter package | Build | Load test | Live-part integration | Installer upgrade | Status |
 |---|---|---|---|---|---|---|---|---|
-| NX2512 | .NET 8（CoreCLR 8.0.31，WindowsDesktop.App 8.0.31；由 `ugii_env_ug.dat` 的 `UGII_NXOPEN_DOTNET_CORE_MAJOR_VERSION=8` 生效） | `NXBIN\managed_core`：NXOpen 2512.0.0.0（x64, net8.0），NXOpen.UF 2512.1700.0.0 | NXAI.Assistant.NxHost.NX2512 | built（2026-10-13，0 警告 0 错误） | run_journal 真实进程内加载+读路径通过（2026-10-13，`artifacts\nxload_validation_result.txt`）；**GUI 菜单入口待用户实测** | planned（阶段 3） | planned | loaded |
+| NX2512 | .NET 8（CoreCLR 8.0.31，WindowsDesktop.App 8.0.31；由 `ugii_env_ug.dat` 的 `UGII_NXOPEN_DOTNET_CORE_MAJOR_VERSION=8` 生效） | `NXBIN\managed_core`：NXOpen 2512.0.0.0（x64, net8.0），NXOpen.UF 2512.1700.0.0 | NXAI.Assistant.NxHost.NX2512 | built（2026-10-13，0 警告 0 错误） | run_journal 真实进程内加载+读路径通过（2026-10-13，`artifacts\nxload_validation_result.txt`）；GUI 菜单入口+modeless 窗口+活动部件读取+模型对话已用户实机验收通过（2026-10-15，六项全过，见 `reports/PHASE_1_CHAT_AND_UI_ACCEPTANCE.md`） | planned（阶段 3） | planned | loaded |
 | 后续更高版本 | 待安装时探测（NxCompatProbe） | 待探测 | 按版本新增 | planned | planned | planned | planned | planned |
 
 状态仅允许使用：`planned`、`built`、`loaded`、`integration-tested`、`supported`。

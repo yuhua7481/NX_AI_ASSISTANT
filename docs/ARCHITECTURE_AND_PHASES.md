@@ -84,15 +84,28 @@ Compatibility Manifest + Installer/Updater
 
 ## 技术选择原则
 
-- 语言：优先 C#，以便在 NX 进程中直接访问 NXOpen。
-- UI：modeless 浮动窗口，可考虑 WinForms 或 WPF；根据已安装 NX2512 的实际运行时与插件加载方式选择，不预先假定目标框架。
-- 插件入口：调查该安装实例支持的自定义菜单/按钮/加载器方式后再定。
-- NXOpen：引用与目标 NX2512 运行时匹配的程序集和目标框架；禁止混用 `managed` 与 `managed_core` 中不兼容的程序集。
-- 网络：插件内部使用 `HttpClient` 或适合选定框架的 HTTP 客户端；不设置任何本地 MCP/Bridge/代理依赖。
-- 配置：可升级的 JSON 设置结构；API Key 单独安全存储。
-- 测试：业务逻辑单元测试 + 独立 NX 实例/测试部件的真实集成验收。
+- 语言：C#（已在用）。
+- UI：**已定案 WinForms（2026-10-14）**——modeless 浮动窗口，WinForms 自绘统一样式。WPF 路线已在真实 NX 中实测排除：NX2512 进程内 .NET 8 基础运行时的 `WindowsBase` 4.0.0.0 桩 + NX 加载器 TPA 全量枚举 + Default ALC 名字保护，三者组合使真 WPF 无法绑定；WinForms 链干净可绑。此为硬约束，不得重启 WPF 实验（详见 `WORK_LOG.md` 2026-10-14 条目）。
+- 插件入口：MenuScript 菜单 + `ACTIONS` shim（已实现并实机验收）。
+- NXOpen：仅 `NxHost` 层引用 `NXBIN\managed_core`（.NET 8，Private=false）；禁止混用 `managed` 与 `managed_core`；必须复用 NX ALC 已加载的 NXOpen 实例（单一类型宇宙）。
+- 网络：插件内 `HttpClient`（支持测试注入）；不设任何本地 MCP/Bridge/代理依赖。
+- 配置：JSON 设置；API Key 经 DPAPI 加密单独存储。
+- 测试：离线单元测试（不依赖 NX）+ 真实 NX2512 实机验收；两者分栏记录（`RELEASE_CHECKLIST.md`）。
 
-## 阶段 0：环境调查与技术验证
+## 当前实现状态（2026-10-15 核验，详见 docs/PROJECT_STATUS.md 与 reports/PHASE_1_CHAT_AND_UI_ACCEPTANCE.md）
+
+| 图中模块 | 状态 |
+|---|---|
+| Modeless Chat Window | **已实现并实机验收**（三区布局、消息卡片流、底部输入区、新对话） |
+| Settings | **已实现并实机验收**（TableLayoutPanel、DPAPI 密钥、留空保留） |
+| Conversation Orchestrator | **已实现**（ChatSessionController：多轮历史、取消、生命周期保护）——仅文本对话，无工具调用 |
+| Direct Provider HTTP Client | **已实现**（OpenAI 兼容 Chat Completions、URL 规范化、错误分类）；流式输出未实现 |
+| Typed NX Tool Registry / Dispatcher / Postcondition Verification | **未实现**（阶段 2/3） |
+| Attachments | 未实现（阶段 5） |
+
+**尚未形成 AI 驱动 NX 建模闭环。**
+
+## 阶段 0：环境调查与技术验证 — ✅ 已完成（2026-10-13，见 PHASE_0_REPORT.md）
 
 - 只读调查 NX2512 的安装目录、示例、插件入口、目标运行时、菜单配置和部署方式。
 - 创建全新项目仓库和解决方案，不从旧项目拷贝源码。
@@ -100,12 +113,13 @@ Compatibility Manifest + Installer/Updater
 - 验证能在当前 NX 会话读取 `Session.Parts.Work` 的基本信息。
 - 明确所有不确定项和真实运行证据。
 
-## 阶段 1：聊天壳与配置
+## 阶段 1：聊天壳与配置 — ✅ 已完成并实机验收（2026-10-15，见 reports/PHASE_1_CHAT_AND_UI_ACCEPTANCE.md）
 
 - 独立聊天窗口、消息列表、输入框、取消/错误状态。
-- Provider 接口与首个可配置 HTTP API Provider。
-- 设置保存、API Key 安全储存、连接测试、流式输出（如所选 API 支持）。
+- Provider 接口与首个可配置 HTTP API Provider（OpenAI 兼容 Chat Completions）。
+- 设置保存、API Key 安全储存（DPAPI）。
 - 本阶段不修改几何。
+- 未做（顺延）：连接测试按钮、流式输出、附件。
 
 ## 阶段 2：活动零件上下文
 
