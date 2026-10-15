@@ -1,19 +1,20 @@
 using System;
 using System.IO;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Security.Cryptography;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace NXAI.Assistant.Core;
 
 /// <summary>
-/// Windows Data Protection API (DPAPI) 互操作层。
-/// - CryptProtectData：使用当前 Windows 用户范围加密数据
-/// - CryptUnprotectData：使用当前 Windows 用户范围解密数据
-/// - 避免硬编码秘密、固定盐值或固定 IV。每次加密使用系统生成的随机惟一数据密钥。
+/// Windows DPAPI (CurrentUser scope) interop. Protect returns a Base64 blob
+/// safe to persist to disk; Unprotect reverses it and returns null on failure.
+/// DPAPI generates per-call random entropy internally — no fixed salt or IV.
 /// </summary>
 internal static class Dpapi
 {
@@ -44,113 +45,163 @@ internal static class Dpapi
         int dwFlags,
         out DATA_BLOB pDataOut);
 
-    private const int CRYPLEPROTECT_UI_FORBIDDEN = 0x1;
-    private const int CRYPLEPROTECT_LOCAL_MACHINE = 0x4;
+    private const int CRYPTPROTECT_UI_FORBIDDEN = 0x1;
 
-    /// <summary>
-    /// 使用 DPAPI 用户范围加密明文字符串。
-    /// 返回 Base64 编码的字符串，可安全保存到文件。
-    /// </summary>
-    /// <param name="clearText">明文字符串。</param>
-    /// <returns>Base64 编码的加密 blob。</returns>
+    /// <summary>Encrypts clear text with DPAPI (current user scope).</summary>
+    /// <returns>Base64-encoded encrypted blob; empty string for empty input.</returns>
     public static string Protect(string clearText)
     {
         if (string.IsNullOrEmpty(clearText))
             return "";
 
-        DATA_BLOB input = new DATA_BLOB();
-        INPUT_BYTE_BLOCK inputBytes = new INPUT_BYTE_BLOCK(Encoding.Unicode.GetBytes(clearText));
-        input.cbSize = inputBytes.bytes.Length;
-        input.pBlobData = Marshal.AllocHGlobal(input.cbSize);
-        Marshal.Copy(inputBytes.bytes, 0, input.pBlobData, input.cbSize);
-
-        DATA_BLOB output = new DATA_BLOB();
-        bool success = CryptProtectData(ref input, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, CRYPLEPROTECT_UI_FORBIDDEN, out output);
-
-        if (!success)
+        byte[] inputBytes = Encoding.Unicode.GetBytes(clearText);
+        DATA_BLOB input = new DATA_BLOB
         {
-            int error = Marshal.GetLastWin32Error();
-            Marshal.FreeHGlobal(input.pBlobData);
-            throw new CryptographicException($"DPAPI 加密失败，错误码: {error}");
+            cbSize = inputBytes.Length,
+            pBlobData = Marshal.AllocHGlobal(inputBytes.Length),
+        };
+        try
+        {
+            Marshal.Copy(inputBytes, 0, input.pBlobData, inputBytes.Length);
+            if (!CryptProtectData(ref input, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero,
+                    CRYPTPROTECT_UI_FORBIDDEN, out DATA_BLOB output))
+            {
+                throw new CryptographicException($"DPAPI 加密失败，错误码: {Marshal.GetLastWin32Error()}");
+            }
+            try
+            {
+                byte[] blobBytes = new byte[output.cbSize];
+                Marshal.Copy(output.pBlobData, blobBytes, 0, output.cbSize);
+                return Convert.ToBase64String(blobBytes);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(output.pBlobData);
+            }
         }
-
-        int size = output.cbSize;
-        byte[] blobBytes = new byte[size];
-        Marshal.Copy(output.pBlobData, blobBytes, 0, size);
-
-        // 清理
-        Marshal.FreeHGlobal(input.pBlobData);
-        Marshal.FreeHGlobal(output.pBlobData);
-
-        return Convert.ToBase64String(blobBytes);
+        finally
+        {
+            Marshal.FreeHGlobal(input.pBlobData);
+        }
     }
 
-    /// <summary>
-    /// 使用 DPAPI 用户范围解密 Base64 编码的 blob。
-    /// </summary>
-    /// <param name="base64">Base64 编码的加密 blob。</param>
-    /// <returns>明文字符串，解密失败返回 null。</returns>
+    /// <summary>Decrypts a Base64-encoded DPAPI blob back to clear text.</summary>
+    /// <returns>Clear text, or null when the blob is invalid or not decryptable by this user.</returns>
     public static string? Unprotect(string base64)
     {
         if (string.IsNullOrEmpty(base64))
             return null;
 
-        byte[] blobBytes = Convert.FromBase64String(base64);
-        DATA_BLOB input = new DATA_BLOB();
-        input.cbSize = blobBytes.Length;
-        input.pBlobData = Marshal.AllocHGlobal(input.cbSize);
-        Marshal.Copy(blobBytes, 0, input.pBlobData, input.cbSize);
-
-        DATA_BLOB output = new DATA_BLOB();
-        // ppszDataDescr: 指向描述字符串的指针。由于我们不需要描述，传 IntPtr.Zero。
-        // 如需描述，API 会分配内存且须使用 LocalFree 释放；此处忽略描述。
-        bool success = CryptUnprotectData(ref input, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, CRYPLEPROTECT_UI_FORBIDDEN, out output);
-
-        if (!success)
+        byte[] blobBytes;
+        try
         {
-            int error = Marshal.GetLastWin32Error();
-            Marshal.FreeHGlobal(input.pBlobData);
+            blobBytes = Convert.FromBase64String(base64);
+        }
+        catch (FormatException)
+        {
             return null;
         }
 
-        int size = output.cbSize;
-        byte[] decryptedBytes = new byte[size];
-        Marshal.Copy(output.pBlobData, decryptedBytes, 0, size);
-
-        // 清理
-        Marshal.FreeHGlobal(input.pBlobData);
-        Marshal.FreeHGlobal(output.pBlobData);
-
-        return Encoding.Unicode.GetString(decryptedBytes);
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-    private struct INPUT_BYTE_BLOCK
-    {
-        public int cbSize;
-        public byte[] bytes;
-        public INPUT_BYTE_BLOCK(byte[] bytes)
+        DATA_BLOB input = new DATA_BLOB
         {
-            this.bytes = bytes;
-            cbSize = bytes.Length;
+            cbSize = blobBytes.Length,
+            pBlobData = Marshal.AllocHGlobal(blobBytes.Length),
+        };
+        try
+        {
+            Marshal.Copy(blobBytes, 0, input.pBlobData, blobBytes.Length);
+            if (!CryptUnprotectData(ref input, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero,
+                    CRYPTPROTECT_UI_FORBIDDEN, out DATA_BLOB output))
+            {
+                return null;
+            }
+            try
+            {
+                byte[] decryptedBytes = new byte[output.cbSize];
+                Marshal.Copy(output.pBlobData, decryptedBytes, 0, output.cbSize);
+                return Encoding.Unicode.GetString(decryptedBytes);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(output.pBlobData);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(input.pBlobData);
         }
     }
 }
 
 /// <summary>
-/// 独立的模型服务组件，封装 HTTP 请求。
-/// - 贕责将聊聊天消息序列化为 OpenAI Chat Completions 格式
-/// - 贕负责异步发送请求，不阻塞 NX UI 线程
-/// - 蕴负责解析助手回复，返回纯文本
-/// - 提供配置持久化与密钥加密（现使用 Windows DPAPI）
+/// Outcome category of a chat-completions request. Callers use this to tell
+/// configuration problems, auth failures, rate limits, server faults and
+/// network problems apart.
 /// </summary>
-public enum ModelProvider
+public enum ModelChatError
 {
-    OpenAI,
-    Anthropic,
-    OpenAICompatible,
+    None = 0,
+
+    /// <summary>Base URL / API key / model name not configured.</summary>
+    NotConfigured,
+
+    /// <summary>Base URL invalid, or the endpoint does not exist (404).</summary>
+    InvalidBaseUrl,
+
+    /// <summary>No sendable message in the conversation (only Info/Error entries).</summary>
+    EmptyMessages,
+
+    /// <summary>Provider rejected the request (HTTP 400 or another unexpected 4xx).</summary>
+    InvalidRequest,
+
+    /// <summary>API key invalid or lacking permission (HTTP 401/403).</summary>
+    AuthFailed,
+
+    /// <summary>Rate limited or quota exhausted (HTTP 429).</summary>
+    RateLimited,
+
+    /// <summary>Provider-side failure (HTTP 5xx).</summary>
+    ServerError,
+
+    /// <summary>Connection failure or timeout.</summary>
+    NetworkError,
+
+    /// <summary>Success status but the body is unusable (bad JSON, no choices/content).</summary>
+    InvalidResponse,
 }
 
+/// <summary>
+/// Result of a chat-completions request: either Success with the assistant
+/// Reply, or an Error category with a user-facing ErrorMessage. Error
+/// messages never contain the API key, auth header or other secrets.
+/// </summary>
+public sealed class ModelChatResult
+{
+    private ModelChatResult(bool success, string? reply, ModelChatError error, string errorMessage)
+    {
+        Success = success;
+        Reply = reply;
+        Error = error;
+        ErrorMessage = errorMessage;
+    }
+
+    public bool Success { get; }
+    public string? Reply { get; }
+    public ModelChatError Error { get; }
+    public string ErrorMessage { get; }
+
+    public static ModelChatResult Ok(string reply) =>
+        new(true, reply, ModelChatError.None, "");
+
+    public static ModelChatResult Fail(ModelChatError error, string message) =>
+        new(false, null, error, message);
+}
+
+/// <summary>
+/// Model API client. Sends chat messages as an OpenAI-compatible
+/// Chat Completions request and returns the assistant reply text.
+/// HTTP runs async — callers must not block the NX UI thread on it.
+/// </summary>
 public sealed class ModelService
 {
     private readonly HttpClient _httpClient;
@@ -159,19 +210,20 @@ public sealed class ModelService
     private string _modelName;
 
     /// <summary>
-    /// ctor - 配置由外部通过 SetConfiguration 或工厂传入。
+    /// Creates the service. Tests inject an HttpClient backed by a fake
+    /// HttpMessageHandler; production uses the default client.
     /// </summary>
-    public ModelService()
+    public ModelService(HttpClient? httpClient = null)
     {
-        _httpClient = new HttpClient();
+        _httpClient = httpClient ?? new HttpClient();
         _apiBaseUrl = "";
         _apiKey = "";
         _modelName = "";
     }
 
     /// <summary>
-    /// 设置模型服务配置。密钥和 Base URL 应该来自安全存储或用户设置，
-    /// 不应硬编码在源码中。
+    /// Sets the provider configuration. Credentials come from the persisted
+    /// configuration (DPAPI-protected) or direct user input — never hard-coded.
     /// </summary>
     public void SetConfiguration(string apiBaseUrl, string apiKey, string modelName)
     {
@@ -180,212 +232,301 @@ public sealed class ModelService
         _modelName = modelName;
     }
 
+    /// <summary>True when API Base URL, API key and model name are all configured.</summary>
+    public bool IsConfigured =>
+        !string.IsNullOrWhiteSpace(_apiBaseUrl) &&
+        !string.IsNullOrWhiteSpace(_apiKey) &&
+        !string.IsNullOrWhiteSpace(_modelName);
+
     /// <summary>
-    /// 发送聊天请求并返回助手回复文本。异步执行，调用方应在 UI 线程上下文中等待结果。
+    /// Normalizes a provider base URL into a full chat-completions endpoint.
+    /// Supported conventions (OpenAI-compatible):
+    ///   - a URL already ending with "/chat/completions" is used unchanged;
+    ///   - a URL ending with a version segment "/v{digits}" (e.g. /v1, /v4)
+    ///     gets "/chat/completions" appended;
+    ///   - anything else gets the default "/v1/chat/completions" appended.
+    /// Rejects empty, relative and non-HTTP(S) URLs, and URLs carrying a query
+    /// or fragment — these are reported instead of silently producing a wrong
+    /// request address.
     /// </summary>
-    /// <param name="messages">聊天消息列表。</param>
-    /// <param name="cancellationToken">取消令牌。</param>
-    /// <returns>助手回复文本；如果请求失败则返回 null。</returns>
-    public async Task<string?> GetChatCompletionAsync(System.Collections.Generic.IEnumerable<ChatMessage> messages, System.Threading.CancellationToken cancellationToken = default)
+    /// <param name="apiBaseUrl">用户配置的服务基础地址。</param>
+    /// <returns>The absolute chat-completions endpoint URL.</returns>
+    /// <exception cref="ArgumentException">The input is empty, not an absolute HTTP(S) URL, or carries a query/fragment.</exception>
+    public static string NormalizeChatCompletionsUrl(string? apiBaseUrl)
     {
-        if (string.IsNullOrWhiteSpace(_apiBaseUrl) || string.IsNullOrWhiteSpace(_apiKey))
+        if (string.IsNullOrWhiteSpace(apiBaseUrl))
+            throw new ArgumentException("API Base URL 未配置。", nameof(apiBaseUrl));
+
+        string trimmed = apiBaseUrl.Trim();
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out Uri? uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
         {
-            return null;
+            throw new ArgumentException(
+                $"API Base URL 不是合法的 HTTP/HTTPS 绝对地址：{trimmed}", nameof(apiBaseUrl));
+        }
+        if (uri.Query.Length > 0 || uri.Fragment.Length > 0)
+        {
+            throw new ArgumentException(
+                "API Base URL 不支持查询参数（?）或片段（#），请只填写服务地址。", nameof(apiBaseUrl));
         }
 
-        // 组装 OpenAI Chat Completions 请求 payload - 手动构建 JSON
-        var sb = new StringBuilder();
-        sb.Append("{");
-        sb.Append("\"model\":");
-        sb.Append(_modelName);
-        sb.Append(",\"messages\":[");
-        bool first = true;
-        foreach (var msg in messages)
+        string url = uri.GetLeftPart(UriPartial.Path).TrimEnd('/');
+        if (url.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase))
+            return url;
+        if (System.Text.RegularExpressions.Regex.IsMatch(url, @"/v\d+$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return url + "/chat/completions";
+        return url + "/v1/chat/completions";
+    }
+
+    /// <summary>
+    /// Sends a chat request and returns the assistant reply, or a categorized
+    /// failure. Only User/Assistant/System roles are sent; local Info/Error
+    /// log entries are filtered out. Caller-initiated cancellation propagates
+    /// as <see cref="OperationCanceledException"/>; every other failure comes
+    /// back as a <see cref="ModelChatResult"/> the UI can show safely.
+    /// </summary>
+    /// <param name="messages">对话消息列表。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    public async Task<ModelChatResult> GetChatCompletionAsync(
+        System.Collections.Generic.IEnumerable<ChatMessage> messages,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(_apiBaseUrl) || string.IsNullOrWhiteSpace(_apiKey) ||
+            string.IsNullOrWhiteSpace(_modelName))
         {
-            if (!first) sb.Append(",");
-            first = false;
-            string role = msg.Role == ChatRole.User ? "user" : msg.Role == ChatRole.Assistant ? "assistant" : "system";
-            string content = msg.Text;
-            sb.Append("{\"role\":\"");
-            sb.Append(role);
-            sb.Append("\",\"content\":\"");
-            sb.Append(EscapeJsonString(content));
-            sb.Append("\"}");
+            return ModelChatResult.Fail(ModelChatError.NotConfigured,
+                "模型 API 未配置：请先在“模型 API 配置”中填写 API Base URL、API Key 和模型名称。");
         }
-        sb.Append("],\"stream\":false}");
-        var json = sb.ToString();
 
-        var fullUrl = _apiBaseUrl.EndsWith("/") ? _apiBaseUrl[..^1] : _apiBaseUrl;
-        fullUrl = fullUrl.EndsWith("/v1/chat/completions") || fullUrl.EndsWith("/v1")
-            ? fullUrl
-            : fullUrl.TrimEnd('/') + "/v1/chat/completions";
-
+        string fullUrl;
         try
         {
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = await _httpClient.PostAsync(new Uri(fullUrl), content, cancellationToken);
+            fullUrl = NormalizeChatCompletionsUrl(_apiBaseUrl);
+        }
+        catch (ArgumentException ex)
+        {
+            return ModelChatResult.Fail(ModelChatError.InvalidBaseUrl, ex.Message);
+        }
 
+        var sendable = System.Linq.Enumerable.ToArray(
+            System.Linq.Enumerable.Where(messages, m =>
+                m.Role is ChatRole.User or ChatRole.Assistant or ChatRole.System));
+        if (sendable.Length == 0)
+        {
+            return ModelChatResult.Fail(ModelChatError.EmptyMessages,
+                "没有可发送的对话消息。");
+        }
+
+        var payload = new
+        {
+            model = _modelName,
+            messages = System.Linq.Enumerable.Select(sendable, m => new
+            {
+                role = m.Role switch
+                {
+                    ChatRole.User => "user",
+                    ChatRole.Assistant => "assistant",
+                    _ => "system",
+                },
+                content = m.Text,
+            }),
+            stream = false,
+        };
+        string json = JsonSerializer.Serialize(payload);
+
+        HttpResponseMessage response;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(fullUrl))
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            response = await _httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return ModelChatResult.Fail(ModelChatError.NetworkError, "请求超时。");
+        }
+        catch (HttpRequestException ex)
+        {
+            return ModelChatResult.Fail(ModelChatError.NetworkError, $"网络请求失败：{ex.Message}");
+        }
+
+        using (response)
+        {
             if (!response.IsSuccessStatusCode)
             {
-                // 读取错误正文以便日志（不返回给用户）
-                _ = await response.Content.ReadAsStringAsync();
+                return MapHttpStatus(response.StatusCode);
+            }
+
+            string responseBody;
+            try
+            {
+                responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return ModelChatResult.Fail(ModelChatError.NetworkError, $"读取响应失败：{ex.Message}");
+            }
+
+            string? reply = ParseChatReply(responseBody, out string parseError);
+            return reply != null
+                ? ModelChatResult.Ok(reply)
+                : ModelChatResult.Fail(ModelChatError.InvalidResponse, parseError);
+        }
+    }
+
+    private static ModelChatResult MapHttpStatus(HttpStatusCode statusCode) => statusCode switch
+    {
+        HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden =>
+            ModelChatResult.Fail(ModelChatError.AuthFailed,
+                $"鉴权失败（HTTP {(int)statusCode}）：API Key 无效或没有访问权限，请检查密钥。"),
+        HttpStatusCode.NotFound =>
+            ModelChatResult.Fail(ModelChatError.InvalidBaseUrl,
+                "接口不存在（HTTP 404）：请检查 API Base URL 是否正确。"),
+        HttpStatusCode.BadRequest =>
+            ModelChatResult.Fail(ModelChatError.InvalidRequest,
+                "请求被拒绝（HTTP 400）：常见原因是模型名称不正确或该服务不支持当前请求格式。"),
+        HttpStatusCode.TooManyRequests =>
+            ModelChatResult.Fail(ModelChatError.RateLimited,
+                "请求过于频繁或额度不足（HTTP 429），请稍后重试。"),
+        var code when (int)code >= 500 =>
+            ModelChatResult.Fail(ModelChatError.ServerError,
+                $"模型服务错误（HTTP {(int)code}），请稍后重试。"),
+        var code =>
+            ModelChatResult.Fail(ModelChatError.InvalidRequest,
+                $"请求被拒绝（HTTP {(int)code}）。"),
+    };
+
+    /// <summary>
+    /// Extracts the reply text from a chat-completions response body.
+    /// Returns null with a user-facing reason when the body is not usable.
+    /// </summary>
+    private static string? ParseChatReply(string responseBody, out string error)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(responseBody);
+            if (!doc.RootElement.TryGetProperty("choices", out var choices) ||
+                choices.GetArrayLength() == 0)
+            {
+                error = "模型响应中没有 choices 内容。";
                 return null;
             }
-
-            var responseBody = await response.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(responseBody);
-            if (doc.RootElement.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
+            if (!choices[0].TryGetProperty("message", out var message) ||
+                !message.TryGetProperty("content", out var content))
             {
-                var firstChoice = choices[0];
-                if (firstChoice.TryGetProperty("message", out var message) && message.TryGetProperty("content", out var txt))
-                {
-                    return txt.GetString();
-                }
+                error = "模型响应中没有 message.content。";
+                return null;
             }
-
-            return null;
+            if (content.ValueKind != JsonValueKind.String)
+            {
+                error = "模型响应内容不是文本。";
+                return null;
+            }
+            string? text = content.GetString();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                error = "模型响应内容为空。";
+                return null;
+            }
+            error = "";
+            return text;
         }
-        catch
+        catch (JsonException)
         {
+            error = "模型响应不是合法 JSON。";
             return null;
         }
     }
 
     /// <summary>
-    /// 将模型配置持久化到用户目录。API Base URL 和模型名称明文保存，
-    /// API Key 使用 Windows DPAPI（用户范围）加密后 Base64 编码写入文件。
-    /// 新保存的配置采用 DPAPI，不再采用固定盐值和固定 IV 的 AES 方案。
+    /// Default persisted-configuration path: %APPDATA%\NX AI Assistant\model-config.json.
     /// </summary>
-    /// <param name="apiBaseUrl">模型 API 的基础 URL（明文）。</param>
-    /// <param name="apiKey">模型 API 的密钥。</param>
-    /// <param name="modelName">模型名称。</param>
-    public static void SaveConfiguration(string apiBaseUrl, string apiKey, string modelName)
+    public static string DefaultConfigPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "NX AI Assistant",
+        "model-config.json");
+
+    /// <summary>
+    /// Persists the configuration. API Base URL and model name are stored as plain
+    /// text; the API key is encrypted with DPAPI (current user scope) before writing.
+    /// </summary>
+    /// <param name="apiBaseUrl">模型 API 的基础 URL（明文存储）。</param>
+    /// <param name="apiKey">模型 API 的密钥（DPAPI 加密后落盘）。</param>
+    /// <param name="modelName">模型名称（明文存储）。</param>
+    /// <param name="configPath">Overrides the destination file (tests use an isolated path).</param>
+    public static void SaveConfiguration(string apiBaseUrl, string apiKey, string modelName,
+        string? configPath = null)
     {
-        // 确保目录存在：%APPDATA%\NX AI Assistant
-        string dir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        string appDir = Path.Combine(dir, "NX AI Assistant");
-        Directory.CreateDirectory(appDir);
+        string path = configPath ?? DefaultConfigPath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
-        string configPath = Path.Combine(appDir, "model-config.json");
-
-        // 使用 DPAPI 加密 API Key（当前 Windows 用户范围，随机生成的数据密钥）
-        string encryptedKey = Dpapi.Protect(apiKey);
-
-        // 构建 JSON 配置
         var config = new
         {
-            apiBaseUrl = apiBaseUrl,
-            modelName = modelName,
-            encryptedApiKey = encryptedKey
+            apiBaseUrl,
+            modelName,
+            encryptedApiKey = Dpapi.Protect(apiKey),
         };
-        string json = JsonSerializer.Serialize(config);
-
-        // 写入文件
-        File.WriteAllText(configPath, json, Encoding.UTF8);
+        File.WriteAllText(path, JsonSerializer.Serialize(config), Encoding.UTF8);
     }
 
     /// <summary>
-    /// 从配置文件加载并解密 API Key。
-    /// 返回 (apiBaseUrl, apiKey, modelName) 三元组。
-    /// 当文件不存在、格式错误或解密失败时返回 null。
-    /// 按以下优先级尝试解密，仅在通过合理性校验后才进行迁移：
-    ///   1. Windows DPAPI (CurrentUser) — 新配置格式
-    ///   2. 旧 AES-256 CBC 方案 (固定盐值/IV, Rfc2898DeriveBytes, 10000 次迭代, SHA256) — 迁移旧配置
-    ///     — 若解密出的文本不通过 IsReasonableApiKey 校验，视为解密失败，继续尝试下一级
-    ///   3. Base64 直接明文 — 兼容旧版无加密 Base64
-     ///     — 若解码出的文本不通过 IsReasonableApiKey 校验，视为明文无效，继续尝试下一级（此处无下一级，返回 null 并保留原文件）
-    /// 仅在解密成功且通过合理性校验后，才将密钥迁移到 DPAPI 格式并重写文件。
-    /// 迁移失败时保留原始配置文件，不得静默覆盖，也不得将密文误认作有效 API Key。
-    /// 如果配置文件缺少格式标识，无法可靠区分旧 AES 密文与随机 Base64 数据，将优先保留原数据不做修改。
+    /// Loads the persisted configuration and decrypts the API key with DPAPI.
+    /// Returns null when the file does not exist, is unreadable, has invalid JSON,
+    /// or the key cannot be decrypted. A failed load never rewrites the file.
     /// </summary>
-    /// <returns>成功返回 (apiBaseUrl, apiKey, modelName)；失败返回 null。</returns>
-    public static (string apiBaseUrl, string apiKey, string modelName)? LoadConfiguration()
+    /// <param name="configPath">Overrides the source file (tests use an isolated path).</param>
+    public static (string apiBaseUrl, string apiKey, string modelName)? LoadConfiguration(string? configPath = null)
     {
-        // 尝试读取配置文件：%APPDATA%\NX AI Assistant\model-config.json
-        string dir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        string configPath = Path.Combine(dir, "NX AI Assistant", "model-config.json");
-
-        if (!File.Exists(configPath))
+        string path = configPath ?? DefaultConfigPath;
+        if (!File.Exists(path))
         {
-            return null; // 文件不存在，视为未配置
+            return null;
         }
 
         string json;
         try
         {
-            json = File.ReadAllText(configPath, Encoding.UTF8);
+            json = File.ReadAllText(path, Encoding.UTF8);
         }
         catch
         {
-            return null; // 读取失败
+            return null;
         }
 
-        // 解析 JSON
-        var config = JsonSerializer.Deserialize<ConfigData>(json);
-        if (config == null) return null;
-
-        string apiBaseUrl = config.apiBaseUrl;
-        string modelName = config.modelName;
-
-        // 第 1 优先级：Windows DPAPI (CurrentUser) — 新配置格式
-        string? decryptedKey = Dpapi.Unprotect(config.encryptedApiKey);
-        if (decryptedKey != null && IsReasonableApiKey(decryptedKey))
-        {
-            // 成功解密（新格式），直接返回
-            return (apiBaseUrl, decryptedKey, modelName);
-        }
-
-        // 第 2 优先级：旧 AES-256 CBC 方案 (固定盐值/IV, Rfc2898DeriveBytes, 10000 次迭代, SHA256)
-        // 仅在解密出的文本通过合理性校验后才视为有效旧配置并迁移
-        decryptedKey = DecryptKeyFromAesLegacy(config.encryptedApiKey);
-        if (decryptedKey != null)
-        {
-            // 旧 AES 解密成功并通过校验，迁移到 DPAPI 格式并重写配置文件
-            try
-            {
-                SaveConfiguration(apiBaseUrl, decryptedKey, modelName);
-            }
-            catch { /* 写入失败时仍返回已解密的明文（已通过校验），避免完全丢失功能 */ }
-            // 迁移完成，返回明文字符串；下次调用 LoadConfiguration 将命中 DPAPI 路径
-            return (apiBaseUrl, decryptedKey, modelName);
-        }
-
-        // 第 3 优先级：Base64 直接明文（旧版无加密 Base64 格式）
-        // 仅在解码出的文本通过 IsReasonableApiKey 校验后才视为有效明文并迁移
+        ConfigData? config;
         try
         {
-            byte[] raw = Convert.FromBase64String(config.encryptedApiKey);
-            string oldKey = Encoding.UTF8.GetString(raw);
-            if (IsReasonableApiKey(oldKey))
-            {
-                // 通过校验，迁移到新 DPAPI 格式并重写配置文件
-                try
-                {
-                    SaveConfiguration(apiBaseUrl, oldKey, modelName);
-                }
-                catch { /* 写入失败时仍返回明文，避免完全丢失功能 */ }
-                return (apiBaseUrl, oldKey, modelName);
-            }
-            // 校验未通过，视为无效明文，继续返回 null 并保留原文件
+            config = JsonSerializer.Deserialize<ConfigData>(json);
         }
-        catch { } // Base64 解码失败或校验未通过，所有迁移失败，保留原配置文件不做任何修改，返回 null
+        catch (JsonException)
+        {
+            return null;
+        }
+        if (config == null)
+            return null;
 
-        // 所有解密方式均未通过校验，返回 null，原始配置文件保持不变
-        return null;
+        string? decryptedKey = Dpapi.Unprotect(config.encryptedApiKey);
+        if (decryptedKey == null || !IsReasonableApiKey(decryptedKey))
+        {
+            // Unknown or corrupted payload: leave the file untouched and report "not configured".
+            return null;
+        }
+
+        return (config.apiBaseUrl, decryptedKey, config.modelName);
     }
 
-    /// <summary>
-    /// 从当前配置中读取设置。若未配置返回 null。
-    /// </summary>
-    /// <returns>配置三元组或 null。</returns>
-    public (string apiBaseUrl, string apiKey, string modelName)? GetCurrentConfiguration()
-    {
-        return LoadConfiguration();
-    }
-
-    /// <summary>
-    /// 用于 JSON 序列化的配置数据模型。
-    /// </summary>
     private class ConfigData
     {
         public string apiBaseUrl { get; set; } = "";
@@ -394,68 +535,18 @@ public sealed class ModelService
     }
 
     /// <summary>
-    /// 使用旧 AES-256 CBC 方案（固定盐值/IV、Rfc2898DeriveBytes）解密密钥。
-    /// 仅用于迁移旧配置；新配置必须使用 DPAPI。
-    /// 解密失败返回 null。
-    /// </summary>
-    /// <param name="encryptedKey">Base64 编码的旧加密密钥。</param>
-    /// <returns>明文字符串，解密失败返回 null。</returns>
-    private static string? DecryptKeyFromAesLegacy(string encryptedKey)
-    {
-        try
-        {
-            byte[] encryptedBytes = Convert.FromBase64String(encryptedKey);
-
-            // 固定的盐值和向量（与旧版 SaveConfiguration 完全一致）
-            byte[] salt = new byte[] { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 };
-            byte[] iv = new byte[] { 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef };
-
-            using var deriveBytes = new Rfc2898DeriveBytes("", salt, 10000, HashAlgorithmName.SHA256);
-            byte[] keyBytes = deriveBytes.GetBytes(32);    // AES-256 需要 256 位密钥
-            byte[] ivBytes = deriveBytes.GetBytes(16);     // AES 块大小为 128 位
-
-            using var aes = Aes.Create();
-            aes.Key = keyBytes;
-            aes.IV = ivBytes;
-            aes.Mode = CipherMode.CBC;
-            aes.Padding = PaddingMode.PKCS7;
-
-            ICryptoTransform decryptor = aes.CreateDecryptor();
-            string? decryptedKey;
-            using (var ms = new MemoryStream())
-            {
-                using (var cs = new CryptoStream(ms, decryptor, CryptoStreamMode.Read))
-                {
-                    using var reader = new StreamReader(cs);
-                    decryptedKey = reader.ReadToEnd();
-                }
-            }
-            // 只有当解密出的文本通过合理性校验后，才认为是有效密钥
-            return IsReasonableApiKey(decryptedKey) ? decryptedKey : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// 对 API Key 进行合理性校验：非空、长度在 1-256、仅含可打印 ASCII（不含控制字符）。
-    /// 用于区分“有效密钥”与 Base64 解码的随机垃圾/明文伪像。
+    /// Sanity check on a decrypted key: non-empty, at most 256 chars, printable
+    /// ASCII only (no control characters).
     /// </summary>
     private static bool IsReasonableApiKey(string? key)
     {
-        if (string.IsNullOrWhiteSpace(key)) return false;
-        if (key.Length > 256) return false;
+        if (string.IsNullOrWhiteSpace(key) || key.Length > 256)
+            return false;
         foreach (char c in key)
         {
-            // 控制字符（0x00-0x1F, 0x7F）会导密钥被视为无效
-            if (c < 0x20 || c == 0x7F) return false;
+            if (c < 0x20 || c == 0x7F)
+                return false;
         }
         return true;
     }
-
-    private static string EscapeJsonString(string s)
-    {
-        return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
-    }}
+}
