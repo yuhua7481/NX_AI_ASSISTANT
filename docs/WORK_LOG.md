@@ -167,3 +167,59 @@
 - **工作区现状**：干净（仅剩未跟踪 `tests/TestResults/`）；HEAD = 远端 = `b1bdc90`。
 - **与 main 关系**：`origin/main` = `be1716c`（用户自行前进），未合并、未推送 main——恢复分支独立，合并决策归用户。
 - **实机验收状态**：Phase 3/4/4.1/4.2 的 NX2512 实机验收仍未执行（不因提交而视为通过）。
+
+## 2026-10-16 · 阶段 5：NX 状态感知、几何对象捕获与上下文建模（源码 + 离线测试完成）
+
+- **任务**：捕获结构化 NX 上下文快照（工作部件/WCS/活动视图/当前选择分类与几何摘要），注入模型请求；create_cylinder 新增 selected_face_center 面相对放置（选中单个平面中心、沿面外法向）；真实 NX 实机验收待用户执行；本任务未授权 Git 操作，成果未提交。
+- **开始前保护**：新备份 `D:\AI\NX_AI_ASSISTANT_backup_20261016_114205`（HEAD=远端=99f7d95，工作区干净）；旧备份未动；未执行 Git 操作。
+- **NXOpen 事实核验**（元数据实测 + XML 文档，非猜测）：`NXOpen.Selection.GetNumSelectedObjects/GetSelectedTaggedObject/IsGlobalSelectionActive`（NXOpenUI.dll，读当前全局选择）；`Face.SolidFaceType → Face.FaceType`（Planar/Cylindrical/...）；`UFModl.AskFaceProps(tag, param[2], point[3], unit normal[3], du[3], dv[3], duu[3], dvv[3], uvp[2])`（UV 参数点求值）；`UFEvalsf.AskFaceUvMinmax(tag, uv[4])`（注意在 Evalsf 而非 Eval）；`BasePart.WCS`（大写）/`BasePart.Views.WorkView`。
+- **主要文件**（修改）：`NxContextSnapshot.cs`（新增，Core DTO：NxContextSnapshot/SelectionItem/FaceInfo/EdgeInfo/PointInfo/BodyInfo/FeatureInfo/CoordinateSystemInfo/ViewInfo + 限长中文摘要 ToContextSummary，标注"状态数据非用户指令"，不含部件完整路径）；`NxContextReader.cs`（新增，NxHost 采集器：选择分类 Body/Face/Edge/Point/Curve(Line/Arc)/Feature/DatumPlane/DatumAxis/DatumCsys/CSYS/other 兜底，面中心+法向仅平面计算，WCS/视图读取，失败字段进 Unavailable 不编造）；`CreateCylinderTool.cs`+`CreateCylinderSchema.cs`（+placement 枚举 global_origin/selected_face_center，未知模式拒绝，旧行为默认不变）；`BlockToolExecutor.cs`（ExecuteCreateCylinder 分派 + ExecuteCreateCylinderOnSelectedFace：运行时从当前选择解析唯一平面，非面/多面/空选/非平面明确拒绝，面中心+法向放置，禁止回退 global_origin；VerifyFaceCylinderCreated 包围盒包含面中心+对角上限验证）；`ChatSessionController.cs`（StartSend 前捕获快照注入当轮 system 摘要；contextProvider 注入点）；`AssistantChatForm.cs`（面相对确认卡显示面中心/法向）；`NxHostBoot.cs`（接线）。
+- **如实声明的限制**：① UV 中点不保证在实际面上（带孔/凹面）——NX2512 托管包装无可靠点-面包含查询，本版不做伪验证；确认卡显示计算的中心供用户目视核对，实机验收覆盖带孔面。② 绝对坐标系（ACS）读取未实现（记入 Unavailable）。③ 顶点（Vertex）无独立 NXOpen 托管类型，选择顶点按 other 兜底（实机确认实际类型后可细化）。④ 面相对圆柱验证为包围盒包含面中心 + 对角上限（倾斜圆柱的精确轴向验证靠实机目视）。
+- **验证结果**【已核实，本轮执行】：`git diff --check` 通过；Release 构建 0 警告 0 错误；测试 **226 项 = 225 通过 / 0 失败 / 1 跳过**（新增 NxContextTests 16 项：DTO 摘要/空选/多选截断/长度上限/global_origin 兼容/placement 解析与拒绝/路径不入摘要；既有全部回归通过）；**部署失败——NX 运行中锁定 DLL，待退出后重跑 build.ps1**（构建产物已就绪）。
+- **遗留**：① 部署（NX 退出后）；② 14 项实机验收待用户（选择识别/上下文反映/面相对创建/取消/部件切换中止/旧模式回归/复杂面拒绝/无自动保存/聊天无回归）；③ 工作区未提交。
+
+## 2026-10-16 · 阶段 5.1：NX 闪退根因定位修复 + 选中面反馈（源码 + 离线测试 + 部署完成，实机验收待用户）
+
+- **故障**：Phase 5 部署后，选中块体平面发送消息即 NX（ugraf.exe）闪退；选中面无任何聊天反馈。优先级高于新功能。
+- **开始前保护**：仓库外完整备份 `D:\AI\NX_AI_ASSISTANT_backup_20261016_crash`（含未提交成果与未跟踪文件，旧备份未动）；故障版本 4 DLL SHA-256 已存档（见 Phase 5.1 报告 §6）；无 git reset/clean/commit/push。
+- **根因定位（有实证）**：Windows 事件日志 `.NET Runtime` 2026-10-16 12:57:09 事件，ugraf.exe `AccessViolationException` 完整托管栈：`SendCurrentInput → StartSend → contextProvider → NxContextReader.Capture → CaptureSelection → DescribeFace → UFEvalsf.AskFaceUvMinmax`。**崩溃阶段 B（发送时上下文采集）**；`UF_EVALSF_ask_face_uv_minmax` 为 B-surface（自由曲面）专用求值器，对平面调用违反前置条件触发原生 AV。线程调度无过错（全栈在 NX UI 线程）。
+- **第二缺陷（被崩溃掩盖）**：反射核验 `UFModl.AskFaceProps` 真实托管签名为 `(face_id, param[2], point[3], u1[3], v1[3], u2[3], v2[3], unit_norm[3], radii[2])`——Phase 5 代码按 `(tag, param, point, normal, du, dv, duu, dvv, uvp)` 传参，法向实际绑定到 u1（错误向量）、末参实为 radii[2]；长度兼容故不崩但几何数据错误。两处调用点同病。
+- **修复**：① 两处 `Evalsf.AskFaceUvMinmax` → `Modl.AskFaceUvMinmax(Tag, uv[4])`（通用面 API，元数据核实）；② 两处 `AskFaceProps` 参数序按反射签名修正，法向取 unit_norm；③ `Core/PhaseLog.cs` 新增（线程安全、绝不抛、512KB 上限、%TEMP%\NXAI_Assistant_phase.log，覆盖采集/选择/面几何/Builder 提交/验证/回滚，无敏感信息）；④ 选中面反馈：发送时显示捕获摘要（含面中心/法向、空选/无部件/失败如实显示）+ 输入区"刷新上下文"按钮（UI 线程采集）；⑤ NxHostBoot provider 失败记录原因；⑥ NxContextReader 类头注释更正并记录教训（签名核实 ≠ 适用域核实）。
+- **主要文件**（修改）：`NxContextReader.cs`、`BlockToolExecutor.cs`、`NxHostBoot.cs`、`ChatSessionController.cs`（+DescribeCapturedContext/CaptureContextNow）、`AssistantChatForm.cs`（+刷新按钮）、`NXAI.Assistant.Core.csproj`（+InternalsVisibleTo）；（新增）`Core/PhaseLog.cs`、`tests/PhaseLogTests.cs`、`tests/ContextFeedbackTests.cs`、`docs/reports/PHASE_5_1_CRASH_AND_CONTEXT_FEEDBACK_FIX.md`。
+- **验证结果**【已核实，本轮执行】：`git diff --check` 通过；Release 构建 0 警告 0 错误；测试 **239 项 = 238 通过 / 0 失败 / 1 跳过**（新增 13 项）；NX 未运行，build.ps1 部署成功（未签名，与既有结论一致），4 DLL SHA-256 与构建产物逐一一致；修复后部署哈希见 Phase 5.1 报告 §6。**离线通过 ≠ 实机通过：崩溃根除以实机只读验收（Phase 5.1 报告 §5 第一、二项）为准。**
+- **遗留**：① Phase 5.1 实机只读验收（8 步，只读先行，任一步异常立即停止）；② Phase 5 全部实机验收仍待执行；③ 工作区未提交（未授权）。
+
+## 2026-10-16 · Phase 5/5.1 实机验收记录更新（用户执行；仅文档，无源码/部署/Git 变更）
+
+- **任务**：按用户 NX2512 实测反馈更新验收记录与项目状态；不修改业务源码、不新增功能、不重新部署、不覆盖备份、不执行 Git 操作。
+- **用户报告通过**（2026-10-16 实机）：
+  1. 原崩溃路径（选中平面 → 发送消息）不再闪退——Phase 5.1 修复实机确认；
+  2. 当前选择读取正常（平面 Face 识别与几何摘要）；
+  3. "刷新上下文"入口正常；
+  4. 空选择处理正常（如实提示）；
+  5. 面相对圆柱（selected_face_center）：确认卡显示与确认后实际创建检查通过（简单平面场景，验收清单第 7、8 项）。
+- **未测（保持待验收，不得视为通过）**：边、顶点、曲线、基准对象及其他对象类型的识别与摘要；切 WCS/切视图上下文反映；确认卡取消路径；确认中切部件/换面目标失效中止；旧 global_origin 模式与 block/cone/sphere 回归；复杂/曲面/歧义目标拒绝（含带孔/凹面）；部件未自动保存、路径未变核对；聊天渲染/选择复制回归。
+- **限制保留**：复杂面 UV 中点可能不在实际面上（无可靠点-面包含查询）；倾斜圆柱精确轴向验证（包围盒验证不能证明轴向）——不因本次简单平面场景通过自动视为已验证。
+- **文档变更**：`docs/reports/PHASE_5_CONTEXT_AWARENESS.md`（§6 拆分为清单 6.1 + 实测结果 6.2）、`docs/reports/PHASE_5_1_CRASH_AND_CONTEXT_FEEDBACK_FIX.md`（§5 增实测结果，§4 增实机确认引注）、`docs/PROJECT_STATUS.md`（当前阶段/验证表拆分为已测与未测两行/风险 0 改写/核验时间）、本文件（本条目）。验收结论以用户对话内报告为准，未附截图/日志存档。
+
+## 2026-10-16 · Phase 6 确认/自主双模式实现（离线验证通过；实机验收待执行）
+
+- **任务**：在现有确认/执行框架上增加可切换双交互模式——确认模式（默认，行为与 Phase 5.1 完全一致）与自主模式（允许清单内的基本体创建工具在校验全部通过后跳过逐次确认）。无平行执行框架、无聊天 UI 重写。
+- **开始前保护**：仓库外完整备份 `D:\AI\NX_AI_ASSISTANT_backup_20261016_phase6_start`（15 MB，含未跟踪文件，旧备份未动）；无 git reset/clean/commit/push。
+- **实现**：
+  - `Core/ExecutionMode.cs`（新增）：`ExecutionMode` 枚举（Confirm/Autonomous）、`AutonomousToolAllowlist`（封闭清单：create_block/cylinder/cone/sphere 四个已注册工具）、`IExecutionModeStore`+`JsonFileExecutionModeStore`（`%APPDATA%\NX AI Assistant\execution-mode.json`，无密钥，损坏→null→默认确认）、`ExecutionModePolicy`（纯函数授权规则，**后端分派阶段执行**，UI 开关只改模式不改规则）、`ExecutionModeManager`（线程安全，SetMode 先持久化后发布，失败内存不变，启动时应用存储值→后端与 UI 启动态必然一致）。Core 不引用 NXOpen/WinForms。
+  - `ChatSessionController.cs`：新增可选 `ExecutionModeManager` 参数（不传时行为与之前完全一致）；`ProcessToolCallAsync` 在分派阶段读模式+策略决定是否走确认；自主路径显示"自主模式：正在创建…"状态行（不谎称成功），执行前重查模式（切回确认→转确认流程）；自主执行 `expectedWorkPartFullPath=null`（执行器内工作部件/单位/UndoMark/回滚/后置验证全部保留）；工具描述文本与确认文本拆分，确认路径文本不变（既有测试断言保持）。
+  - `UI/ModeToggleSwitch.cs`（新增）：自绘开关，OFF 灰轨左滑块"确认模式"/ON 橙轨右滑块"自主模式"，状态由文字标签表达（不只靠颜色），DeviceDpi 缩放，键盘（空格/回车）+Accessibility；控件只发 ToggleRequested，由窗体校验后回写 SetChecked。
+  - `UI/AssistantChatForm.cs`：构造 `ExecutionModeManager` 并注入控制器；输入框上方模式条（执行模式标签+开关+状态文字）；切换规则——请求进行中拒绝并提示、持久化失败恢复真实状态+错误信息、切换成功写聊天说明；切换不触发建模、不等价于任何待执行操作的确认。
+- **测试**：新增 `ExecutionModeTests.cs`（22 项）+`ExecutionModeControllerTests.cs`（13 项）：默认模式/持久化往返/损坏文件/启动恢复/持久化失败内存不变/允许清单封闭性/策略矩阵/确认模式回归/自主跳过确认恰好执行一次/非法参数与未知工具与未知字段不执行/pending 确认卡期间切自主不自动执行/用户取消无几何/在途切回确认走确认流程/无重复提交。注意：测试宿主裸 await TCS 崩溃限制仍适用，沿用 WhenAny+Delay 模式；ScriptedSender 扩展支持 `Func<Task<ChatCompletionResult>>`（可阻塞响应，用于确定性竞态测试）。
+- **主要文件**（新增）：`Core/ExecutionMode.cs`、`UI/ModeToggleSwitch.cs`、`tests/ExecutionModeTests.cs`、`tests/ExecutionModeControllerTests.cs`、`docs/reports/PHASE_6_EXECUTION_MODES.md`；（修改）`UI/ChatSessionController.cs`、`UI/AssistantChatForm.cs`。
+- **验证结果**【已核实，本轮执行】：`git diff --check` 通过；Release 构建 0 警告 0 错误；测试 **274 项 = 273 通过 / 0 失败 / 1 跳过**（+35 项，既有 226 项无回归；跳过项为需真实 NX 的验收测试，按设计跳过）；NX 未运行，4 DLL 复制部署至 `deploy/nxai_custom/application/`，SHA-256 与构建产物逐一一致（Core `eee89cb2…`、UI `42a69190…`、NxHost.NX2512 `5db56835…`、Entry `25d48833…`，完整哈希见 Phase 6 报告 §6）。**离线通过 ≠ 实机通过：Phase 6 报告 §7 的 11 项实机验收清单全部待执行，不得标记为通过。**
+- **遗留**：① Phase 6 实机验收 11 项待执行；② Phase 5 剩余实机验收项仍待执行；③ 工作区未提交（未授权）。
+
+## 2026-10-16 · Phase 6.1 修复执行模式开关显示不完整（离线验证通过；实机复验待执行）
+
+- **现象**（用户实机验收报告）：模式切换功能正常，但聊天界面"执行模式"区域开关显示不完整。
+- **根因**（代码检查确认）：① `modeBar` 固定 `Height=30` + 上下 Padding 2 → 内高 26px，而开关自绘高度按 DeviceDpi 缩放（125%=30px、150%=35px），超出部分被 TableLayoutPanel 裁剪（窗体 AutoScaleMode.Font 与 DPI 缩放系数不一致时必然出现）；② `_modeBarStateLabel` 创建并持续更新但从未加入任何容器（死控件，不可见）。
+- **修复**（仅 `AssistantChatForm.cs` 模式条区域）：modeBar 改为内容驱动高度（Panel AutoSize + TLP RowStyle(AutoSize)，行高随开关 GetPreferredSize 的 DPI 缩放值自适应）；开关 Dock=Fill 垂直居中；删除死控件 `_modeBarStateLabel`（模式状态由开关自身文字标签表达）。未改动 ModeToggleSwitch 绘制、点击/键盘/无障碍/持久化、授权策略、允许清单、工具调用与 NX 执行链路。
+- **验证**【本轮执行】：Release 构建 0 警告 0 错误；测试 **274 项 = 273 通过 / 0 失败 / 1 跳过**（无回归）；`git diff --check` 通过；NX 未运行，仅 UI.dll 变更并部署，SHA-256 与构建产物一致（`191589a4…`，完整值见 Phase 6 报告 Phase 6.1 节）。备份：`D:\AI\NX_AI_ASSISTANT_backup_20261016_phase61_start`。
+- **遗留**：开关 OFF/ON 完整显示、无遮挡、DPI/缩放、点击键盘无障碍持久化共 5 项实机复验待执行（清单见 Phase 6 报告 Phase 6.1 节）；Phase 6 主清单与 Phase 5 剩余项仍待执行；工作区未提交（未授权）。

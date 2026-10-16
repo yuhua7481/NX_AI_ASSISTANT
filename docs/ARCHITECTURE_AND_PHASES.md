@@ -101,7 +101,9 @@ Compatibility Manifest + Installer/Updater
 | Conversation Orchestrator | **已实现并实机验收**（ChatSessionController：多轮历史、取消、生命周期保护 + 工具回合状态机：每回合至多一次建模执行、2 回合上限） |
 | Direct Provider HTTP Client | **已实现**（OpenAI 兼容 Chat Completions、URL 规范化、错误分类 + tools 声明与 tool_calls 解析）；流式输出未实现 |
 | Typed NX Tool Registry / Dispatcher / Postcondition Verification | **已实现（create_block + create_cylinder 两工具）**：Core 契约/注册表 + NxHost `NxToolExecutor`（无 SaveAs、UndoMark 回滚、UF 包围盒验证、毫米部件门禁、部件变化拒绝）。create_block 八项实机验收通过（2026-10-16，用户报告）；create_cylinder 源码+测试完成，实机待验收 |
-| Attachments | 未实现（阶段 5） |
+| NX Context Awareness（Phase 5） | **源码 + 离线测试完成**：NxContextSnapshot DTO（Core）+ NxContextReader 采集（NxHost，选择分类/面中心法向/WCS/视图）+ 每轮 system 摘要注入；面相对圆柱（selected_face_center）。实机待验收 |
+| Execution Modes（Phase 6） | **源码 + 离线测试 + 部署完成**：Core `ExecutionMode` 策略/允许清单/持久化（%APPDATA%\NX AI Assistant\execution-mode.json）、控制器分派阶段授权（自主模式仅四基本体跳过确认，执行前重查模式）、UI 橙色滑动开关（文字标签表达状态、DPI/键盘/无障碍）。实机待验收（Phase 6 报告 §7） |
+| Attachments | 未实现（阶段 5 顺延） |
 
 **AI 驱动建模闭环已建立并经用户 NX2512 实机验收通过（2026-10-16，八项；证据为用户报告）。**
 
@@ -140,7 +142,15 @@ Compatibility Manifest + Installer/Updater
 
 逐个引入孔、拉伸、圆角、倒角、阵列、参数修改等操作。每项通过真实 NX 集成验收后才对模型开放。
 
-> 注：create_cylinder（圆柱体）已按此模式先行交付（2026-10-16，源码+测试完成，实机验收待执行），见 reports/PHASE_3_CREATE_CYLINDER.md。
+> 注：create_cylinder/create_cone/create_sphere 已按此模式先行交付（2026-10-16），见 reports/PHASE_3/4 报告；面相对放置（Phase 5）见 reports/PHASE_5_CONTEXT_AWARENESS.md。
+
+## 执行模式（Phase 6，2026-10-16 实现，实机待验收）
+
+- 双交互模式：**确认模式**（默认，所有建模操作执行前显示确认卡，行为与之前版本一致）与**自主模式**（允许清单内的非破坏性基本体创建工具在参数/上下文/安全校验全部通过后直接执行）。
+- 授权在后端分派阶段执行（`ExecutionModePolicy`），UI 开关只改变模式；模型无法修改模式、授权或允许清单。
+- 允许清单封闭：create_block/create_cylinder/create_cone/create_sphere；未来破坏性操作不自动纳入。
+- 模式经 `%APPDATA%\NX AI Assistant\execution-mode.json` 持久化，启动时后端与 UI 同源恢复；请求进行中禁止切换；切换不等价于对任何待执行操作的确认。
+- 详见 reports/PHASE_6_EXECUTION_MODES.md。
 
 ## 阶段 5：附件与工程打包
 
