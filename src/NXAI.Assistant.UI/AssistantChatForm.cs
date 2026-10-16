@@ -40,7 +40,6 @@ public sealed class AssistantChatForm : Form
     private volatile bool _detached;
     private readonly ToolTip _toolTip = new();
     private readonly ContextMenuStrip _copyMenu = new();
-    private readonly List<MessageItem> _messageItems = new();
 
     private readonly Label _headerTitleLabel;
     private readonly Label _headerModelLabel;
@@ -769,7 +768,6 @@ public sealed class AssistantChatForm : Form
         _chatLog.Clear();
         while (_messagesPanel.Controls.Count > 0)
             _messagesPanel.Controls[0].Dispose();
-        _messageItems.Clear();
 
         _chatLog.Add(ChatRole.Info, "已开始新对话，之前的消息不会发送给模型。");
         UpdateSessionStatus();
@@ -849,7 +847,6 @@ public sealed class AssistantChatForm : Form
     {
         var item = new MessageItem(message, _toolTip, _copyMenu);
         item.ApplyViewportWidth(_messagesPanel.ClientSize.Width);
-        _messageItems.Add(item);
         _messagesPanel.Controls.Add(item);
         item.BringToFront(); // Dock=Top 子项按 z 序停靠：BringToFront 使新消息排在最底部
         UpdateSessionStatus();
@@ -858,8 +855,16 @@ public sealed class AssistantChatForm : Form
 
     private void ApplyViewportWidthToAllItems()
     {
+        // Single source of truth: the control tree. Items removed or disposed
+        // by any path (new conversation, window teardown) are gone from
+        // panel.Controls, so a ClientSizeChanged firing mid-disposal can
+        // never reach a disposed item through this loop. The _detached gate
+        // covers the form-teardown window where the panel itself is going
+        // away with this handler still attached.
+        if (_detached || IsDisposed || _messagesPanel.IsDisposed)
+            return;
         int width = _messagesPanel.ClientSize.Width;
-        foreach (var item in _messageItems)
+        foreach (var item in _messagesPanel.Controls.OfType<MessageItem>())
             item.ApplyViewportWidth(width);
     }
 
@@ -1007,8 +1012,9 @@ public sealed class AssistantChatForm : Form
     /// 单条消息卡片。用户消息为右侧圆角气泡，助手回复为左侧通栏文本，
     /// Info 居中弱化显示，错误为红色气泡。文本按视口宽度自动换行，
     /// 不使用 ListBox，因此没有系统蓝色选中高亮。
+    /// internal 供生命周期测试使用（InternalsVisibleTo）。
     /// </summary>
-    private sealed class MessageItem : Panel
+    internal sealed class MessageItem : Panel
     {
         private const int BubblePadH = 14;
         private const int BubblePadV = 10;
@@ -1144,9 +1150,15 @@ public sealed class AssistantChatForm : Form
         /// 视口宽度变化时重新计算换行宽度。RichTextBox 在设定宽度后按
         /// WordWrap 自然换行，ContentsResized 驱动高度自适应；气泡 AutoSize
         /// 随之重排，因此窗口缩放不会产生水平裁切。
+        /// 存活检查：控件树移除是同步的，但窗体拆除时子视图（RichTextBox）
+        /// 会先于本控件离开树被释放，期间仍可能收到宽度回调——此时必须
+        /// 不再触碰已释放的视图。这是对"遍历只含存活项"的结构性保证之外
+        /// 的拆除窗口防线。
         /// </summary>
         public void ApplyViewportWidth(int viewportWidth)
         {
+            if (IsDisposed || UsedViewIsDisposed())
+                return;
             int bubbleChrome = _bubble != null ? 2 * BubblePadH : 0;
             int roleBudget = Role switch
             {
@@ -1169,6 +1181,9 @@ public sealed class AssistantChatForm : Form
                 _bodyView.MaximumSize = new Size(width, 0);
             }
         }
+
+        private bool UsedViewIsDisposed() =>
+            _bodyRichText is { IsDisposed: true } || _bodyView.IsDisposed;
 
         private void RepositionByRole()
         {
