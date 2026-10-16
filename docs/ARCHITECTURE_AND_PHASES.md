@@ -96,14 +96,14 @@ Compatibility Manifest + Installer/Updater
 
 | 图中模块 | 状态 |
 |---|---|
-| Modeless Chat Window | **已实现并实机验收**（三区布局、消息卡片流、底部输入区、新对话） |
+| Modeless Chat Window | **已实现并实机验收**（三区布局、消息卡片流、底部输入区、新对话、确认对话框、NX 退出不挂起） |
 | Settings | **已实现并实机验收**（TableLayoutPanel、DPAPI 密钥、留空保留） |
-| Conversation Orchestrator | **已实现**（ChatSessionController：多轮历史、取消、生命周期保护）——仅文本对话，无工具调用 |
-| Direct Provider HTTP Client | **已实现**（OpenAI 兼容 Chat Completions、URL 规范化、错误分类）；流式输出未实现 |
-| Typed NX Tool Registry / Dispatcher / Postcondition Verification | **未实现**（阶段 2/3） |
+| Conversation Orchestrator | **已实现并实机验收**（ChatSessionController：多轮历史、取消、生命周期保护 + 工具回合状态机：每回合至多一次建模执行、2 回合上限） |
+| Direct Provider HTTP Client | **已实现**（OpenAI 兼容 Chat Completions、URL 规范化、错误分类 + tools 声明与 tool_calls 解析）；流式输出未实现 |
+| Typed NX Tool Registry / Dispatcher / Postcondition Verification | **已实现并实机验收**（create_block 唯一工具）：Core 契约/注册表 + NxHost `NxToolExecutor`（无 SaveAs、UndoMark 回滚、UF 包围盒验证、毫米部件门禁、部件变化拒绝）；八项实机验收通过（2026-10-16，用户报告） |
 | Attachments | 未实现（阶段 5） |
 
-**尚未形成 AI 驱动 NX 建模闭环。**
+**AI 驱动建模闭环已建立并经用户 NX2512 实机验收通过（2026-10-16，八项；证据为用户报告）。**
 
 ## 阶段 0：环境调查与技术验证 — ✅ 已完成（2026-10-13，见 PHASE_0_REPORT.md）
 
@@ -127,12 +127,14 @@ Compatibility Manifest + Installer/Updater
 - 将查询结果转换成适合模型理解的结构化摘要。
 - 查询工具只读且可重复验证。
 
-## 阶段 3：第一个实时建模闭环
+> 注：实际开发中工具调用与第一个建模闭环（create_block）先行交付（2026-10-16，实机验收通过）；本阶段（活动零件上下文查询）顺延为下一候选任务。
 
-- 先实现一个范围受控的 NX 工具（例如创建基础实体，或在已有实体上执行一个经过验证的特征操作）。
-- Tool schema、输入验证、前置条件、操作日志与后置验证齐全。
-- 修改发生于当前 NX 活动部件，并在同一会话中特征树/几何可见。
-- 失败时返回真实错误，不声称成功。
+## 阶段 3：第一个实时建模闭环 — ✅ 已完成并实机验收（原阶段 2 内容，2026-10-16）
+
+- 类型化工具（create_block）：schema、输入验证、确认流、操作日志与后置验证齐全（见 reports/PHASE_2_TOOL_CALLING_AND_CREATE_BLOCK.md）。
+- 修改发生于当前 NX 活动部件，同一会话中特征树/几何可见（实机验收第 ② 项）。
+- 失败回滚并返回真实错误（实机验收第 ⑤ 项覆盖）。
+- 后续建模工具（圆柱、孔等）在闭环稳定后逐个引入，每个经实机验收后开放。
 
 ## 阶段 4：常用零件特征
 

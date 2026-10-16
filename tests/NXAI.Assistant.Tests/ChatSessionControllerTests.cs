@@ -16,16 +16,19 @@ public class ChatSessionControllerTests
 {
     private sealed class ScriptedSender
     {
-        public readonly List<IReadOnlyList<ChatMessage>> Requests = new();
+        public readonly List<IReadOnlyList<OutboundMessage>> Requests = new();
         public readonly List<CancellationToken> Tokens = new();
-        public Func<IReadOnlyList<ChatMessage>, CancellationToken, Task<ModelChatResult>> Behavior =
-            (_, _) => Task.FromResult(ModelChatResult.Ok("默认回复"));
+        public Func<IReadOnlyList<OutboundMessage>, IReadOnlyList<ToolDefinition>?, CancellationToken, Task<ChatCompletionResult>> Behavior =
+            (_, _, _) => Task.FromResult(ChatCompletionResult.OkText("默认回复"));
 
-        public Task<ModelChatResult> SendAsync(IReadOnlyList<ChatMessage> messages, CancellationToken ct)
+        public Task<ChatCompletionResult> SendAsync(
+            IReadOnlyList<OutboundMessage> messages,
+            IReadOnlyList<ToolDefinition>? tools,
+            CancellationToken ct)
         {
             Requests.Add(messages);
             Tokens.Add(ct);
-            return Behavior(messages, ct);
+            return Behavior(messages, tools, ct);
         }
     }
 
@@ -108,7 +111,7 @@ public class ChatSessionControllerTests
 
         Assert.Equal(1, started);
         Assert.Single(sender.Requests);
-        Assert.Contains(sender.Requests[0], m => m.Role == ChatRole.User && m.Text == "你好");
+        Assert.Contains(sender.Requests[0], m => m.Role == OutboundMessage.RoleUser && m.Content == "你好");
         Assert.Equal(2, log.Messages.Count); // user message + the scripted default reply
         Assert.Equal(ChatRole.User, log.Messages[0].Role);
         Assert.Equal("你好", log.Messages[0].Text);
@@ -119,7 +122,7 @@ public class ChatSessionControllerTests
     public async Task Success_reply_added_as_assistant_message()
     {
         var (controller, sender, log) = Create();
-        sender.Behavior = (_, _) => Task.FromResult(ModelChatResult.Ok("你好，我是助手。"));
+        sender.Behavior = (_, _, _) => Task.FromResult(ChatCompletionResult.OkText("你好，我是助手。"));
         var completion = WaitForCompletedAsync(controller);
 
         Assert.True(controller.StartSend("你好"));
@@ -135,8 +138,8 @@ public class ChatSessionControllerTests
     public async Task Failure_result_shown_as_error_message()
     {
         var (controller, sender, log) = Create();
-        sender.Behavior = (_, _) => Task.FromResult(
-            ModelChatResult.Fail(ModelChatError.AuthFailed, "鉴权失败（HTTP 401）：API Key 无效或没有访问权限，请检查密钥。"));
+        sender.Behavior = (_, _, _) => Task.FromResult(
+            ChatCompletionResult.Fail(ModelChatError.AuthFailed, "鉴权失败（HTTP 401）：API Key 无效或没有访问权限，请检查密钥。"));
         var completion = WaitForCompletedAsync(controller);
 
         Assert.True(controller.StartSend("hi"));
@@ -152,7 +155,7 @@ public class ChatSessionControllerTests
     {
         // ChatLog.Add throws on blank text; a defensive path must prevent that.
         var (controller, sender, log) = Create();
-        sender.Behavior = (_, _) => Task.FromResult(ModelChatResult.Ok("   "));
+        sender.Behavior = (_, _, _) => Task.FromResult(ChatCompletionResult.OkText("   "));
         var completion = WaitForCompletedAsync(controller);
 
         Assert.True(controller.StartSend("hi"));
@@ -169,8 +172,8 @@ public class ChatSessionControllerTests
     public async Task Duplicate_send_while_in_flight_is_rejected_then_recovers()
     {
         var (controller, sender, _) = Create();
-        var gate = new TaskCompletionSource<ModelChatResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        sender.Behavior = (_, _) => gate.Task;
+        var gate = new TaskCompletionSource<ChatCompletionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        sender.Behavior = (_, _, _) => gate.Task;
         var completion = WaitForCompletedAsync(controller);
 
         Assert.True(controller.StartSend("第一条"));
@@ -178,7 +181,7 @@ public class ChatSessionControllerTests
         Assert.False(controller.StartSend("第二条"));
         Assert.Single(sender.Requests);
 
-        gate.SetResult(ModelChatResult.Ok("回复"));
+        gate.SetResult(ChatCompletionResult.OkText("回复"));
         await completion;
         Assert.False(controller.IsRequestInFlight);
 
@@ -190,10 +193,10 @@ public class ChatSessionControllerTests
     public async Task Cancel_aborts_request_token_and_restores_state()
     {
         var (controller, sender, log) = Create();
-        sender.Behavior = async (_, ct) =>
+        sender.Behavior = async (_, _, ct) =>
         {
             await Task.Delay(Timeout.Infinite, ct);
-            return ModelChatResult.Ok("不应到达");
+            return ChatCompletionResult.OkText("不应到达");
         };
         var started = 0;
         var completed = 0;
@@ -229,15 +232,15 @@ public class ChatSessionControllerTests
         await completion;
 
         Assert.Single(sender.Requests[0]);
-        Assert.Equal(ChatRole.User, sender.Requests[0][0].Role);
-        Assert.Equal("你好", sender.Requests[0][0].Text);
+        Assert.Equal(OutboundMessage.RoleUser, sender.Requests[0][0].Role);
+        Assert.Equal("你好", sender.Requests[0][0].Content);
     }
 
     [Fact]
     public async Task Two_rounds_send_correct_history_roles_and_order()
     {
         var (controller, sender, _) = Create();
-        sender.Behavior = (_, _) => Task.FromResult(ModelChatResult.Ok("好的"));
+        sender.Behavior = (_, _, _) => Task.FromResult(ChatCompletionResult.OkText("好的"));
         var completion1 = WaitForCompletedAsync(controller);
         Assert.True(controller.StartSend("第一问"));
         await completion1;
@@ -247,16 +250,16 @@ public class ChatSessionControllerTests
 
         var second = sender.Requests[1];
         Assert.Equal(3, second.Count);
-        Assert.Equal((ChatRole.User, "第一问"), (second[0].Role, second[0].Text));
-        Assert.Equal((ChatRole.Assistant, "好的"), (second[1].Role, second[1].Text));
-        Assert.Equal((ChatRole.User, "第二问"), (second[2].Role, second[2].Text));
+        Assert.Equal((OutboundMessage.RoleUser, "第一问"), (second[0].Role, second[0].Content));
+        Assert.Equal((OutboundMessage.RoleAssistant, "好的"), (second[1].Role, second[1].Content));
+        Assert.Equal((OutboundMessage.RoleUser, "第二问"), (second[2].Role, second[2].Content));
     }
 
     [Fact]
     public async Task History_is_capped_to_last_max_outbound_messages()
     {
         var (controller, sender, log) = Create();
-        sender.Behavior = (_, _) => Task.FromResult(ModelChatResult.Ok("ok"));
+        sender.Behavior = (_, _, _) => Task.FromResult(ChatCompletionResult.OkText("ok"));
         for (var i = 1; i <= 25; i++)
             log.Add(ChatRole.User, $"历史{i}");
         var completion = WaitForCompletedAsync(controller);
@@ -266,8 +269,8 @@ public class ChatSessionControllerTests
 
         var sent = sender.Requests[0];
         Assert.Equal(ChatSessionController.DefaultMaxOutboundMessages, sent.Count);
-        Assert.Equal("历史7", sent[0].Text); // 26 sendable -> keep the last 20
-        Assert.Equal("新消息", sent[^1].Text);
+        Assert.Equal("历史7", sent[0].Content); // 26 sendable -> keep the last 20
+        Assert.Equal("新消息", sent[^1].Content);
     }
 
     [Fact]
@@ -276,7 +279,7 @@ public class ChatSessionControllerTests
         // 对应主窗口“新对话”按钮的行为：ChatLog.Clear 之后，下一个请求
         // 只携带新对话的内容，旧的用户消息和助手回复都不会再发送。
         var (controller, sender, log) = Create();
-        sender.Behavior = (_, _) => Task.FromResult(ModelChatResult.Ok("好的"));
+        sender.Behavior = (_, _, _) => Task.FromResult(ChatCompletionResult.OkText("好的"));
         var completion1 = WaitForCompletedAsync(controller);
         Assert.True(controller.StartSend("旧问题"));
         await completion1;
@@ -290,9 +293,9 @@ public class ChatSessionControllerTests
 
         var sent = sender.Requests[1];
         Assert.Single(sent);
-        Assert.Equal((ChatRole.User, "新问题"), (sent[0].Role, sent[0].Text));
-        Assert.DoesNotContain(sent, m => m.Text.Contains("旧问题"));
-        Assert.DoesNotContain(sent, m => m.Text.Contains("好的"));
+        Assert.Equal((OutboundMessage.RoleUser, "新问题"), (sent[0].Role, sent[0].Content));
+        Assert.DoesNotContain(sent, m => m.Content!.Contains("旧问题"));
+        Assert.DoesNotContain(sent, m => m.Content!.Contains("好的"));
     }
 
     // ---------------------------------------------------------- window lifetime
@@ -301,8 +304,8 @@ public class ChatSessionControllerTests
     public async Task Detach_drops_late_result_without_touching_log()
     {
         var (controller, sender, log) = Create();
-        var gate = new TaskCompletionSource<ModelChatResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        sender.Behavior = (_, _) => gate.Task;
+        var gate = new TaskCompletionSource<ChatCompletionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        sender.Behavior = (_, _, _) => gate.Task;
         var completedAfterDetach = false;
         controller.RequestCompleted += (_, _) => completedAfterDetach = true;
 
@@ -311,7 +314,7 @@ public class ChatSessionControllerTests
         Assert.True(sender.Tokens[0].IsCancellationRequested);
         Assert.False(controller.StartSend("关闭后的输入"));
 
-        gate.SetResult(ModelChatResult.Ok("迟到回复"));
+        gate.SetResult(ChatCompletionResult.OkText("迟到回复"));
         await UntilAsync(() => !controller.IsRequestInFlight);
 
         Assert.False(completedAfterDetach);
