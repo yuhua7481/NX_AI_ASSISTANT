@@ -24,7 +24,7 @@ public static class NxHostBoot
             return;
         }
 
-        _chatForm = new AssistantChatForm(new NxSessionReader());
+        _chatForm = new AssistantChatForm(new NxSessionReader(), new NxToolExecutor());
         _chatForm.Show();
     }
 }

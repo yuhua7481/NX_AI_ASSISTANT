@@ -22,18 +22,9 @@ public static class BlockRequestValidator
     public static string? Validate(double originX, double originY, double originZ,
         double length, double width, double height, string? targetPath)
     {
-        if (!double.IsFinite(originX) || !double.IsFinite(originY) || !double.IsFinite(originZ))
-            return "Origin coordinates must be finite numbers.";
-        if (Math.Abs(originX) > MaxCoordinateMm || Math.Abs(originY) > MaxCoordinateMm ||
-            Math.Abs(originZ) > MaxCoordinateMm)
-            return $"Origin coordinates exceed the sanity bound of ±{MaxCoordinateMm} mm.";
-
-        if (!double.IsFinite(length) || !double.IsFinite(width) || !double.IsFinite(height))
-            return "Dimensions must be finite numbers.";
-        if (length <= 0 || width <= 0 || height <= 0)
-            return "Dimensions must be positive numbers.";
-        if (length > MaxDimensionMm || width > MaxDimensionMm || height > MaxDimensionMm)
-            return $"Dimensions exceed the sanity bound of {MaxDimensionMm} mm.";
+        string? geometryError = ValidateWorkingPartRequest(originX, originY, originZ, length, width, height);
+        if (geometryError != null)
+            return geometryError;
 
         if (string.IsNullOrWhiteSpace(targetPath))
             return "Target path must be specified.";
@@ -49,6 +40,30 @@ public static class BlockRequestValidator
         {
             return $"Invalid target path: {ex.Message}";
         }
+        return null;
+    }
+
+    /// <summary>
+    /// Geometry-only validation for requests that act on the current work part
+    /// (no file path is involved: the AI path never saves or re-paths the part).
+    /// Returns null when valid, otherwise a user-facing error message.
+    /// </summary>
+    public static string? ValidateWorkingPartRequest(
+        double originX, double originY, double originZ,
+        double length, double width, double height)
+    {
+        if (!double.IsFinite(originX) || !double.IsFinite(originY) || !double.IsFinite(originZ))
+            return "Origin coordinates must be finite numbers.";
+        if (Math.Abs(originX) > MaxCoordinateMm || Math.Abs(originY) > MaxCoordinateMm ||
+            Math.Abs(originZ) > MaxCoordinateMm)
+            return $"Origin coordinates exceed the sanity bound of ±{MaxCoordinateMm} mm.";
+
+        if (!double.IsFinite(length) || !double.IsFinite(width) || !double.IsFinite(height))
+            return "Dimensions must be finite numbers.";
+        if (length <= 0 || width <= 0 || height <= 0)
+            return "Dimensions must be positive numbers.";
+        if (length > MaxDimensionMm || width > MaxDimensionMm || height > MaxDimensionMm)
+            return $"Dimensions exceed the sanity bound of {MaxDimensionMm} mm.";
         return null;
     }
 }

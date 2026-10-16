@@ -33,6 +33,9 @@ public sealed class AssistantChatForm : Form
     private readonly IActivePartReader _partReader;
     private readonly ChatLog _chatLog = new();
     private readonly ChatSessionController _controller;
+    private readonly INxToolExecutor? _toolExecutor;
+    private ToolConfirmationRequest? _pendingConfirmation;
+    private volatile bool _detached;
     private readonly ToolTip _toolTip = new();
     private readonly ContextMenuStrip _copyMenu = new();
     private readonly List<MessageItem> _messageItems = new();
@@ -51,12 +54,18 @@ public sealed class AssistantChatForm : Form
     private readonly Button _cancelButton;
     private readonly Label _inputHintLabel;
 
-    public AssistantChatForm(IActivePartReader partReader)
+    public AssistantChatForm(IActivePartReader partReader, INxToolExecutor? toolExecutor = null)
     {
         _partReader = partReader ?? throw new ArgumentNullException(nameof(partReader));
+        _toolExecutor = toolExecutor;
 
-        _controller = new ChatSessionController(new ModelService(), _chatLog,
-            () => ModelService.LoadConfiguration());
+        ChatSessionController BuildController() => new(
+            new ModelService(), _chatLog, () => ModelService.LoadConfiguration(),
+            requestSender: null,
+            toolExecutor: toolExecutor,
+            confirmationHandler: toolExecutor != null ? ShowToolConfirmationAsync : null);
+
+        _controller = BuildController();
         _controller.RequestStarted += (_, _) => SetRequestUiState(inFlight: true);
         _controller.RequestCompleted += (_, _) => SetRequestUiState(inFlight: false);
         // Apply a saved configuration (if any) immediately — no settings dialog needed.
@@ -369,6 +378,83 @@ public sealed class AssistantChatForm : Form
             _chatLog.Add(ChatRole.Info, "模型配置已保存，但内容不完整，请重新检查。");
     }
 
+    // ------------------------------------------------------------ tool confirmation
+
+    /// <summary>
+    /// Presents a pending modeling action for explicit user confirmation.
+    /// Runs on the UI thread (controller continuations arrive via the WinForms
+    /// SynchronizationContext). Returns the user's decision, or null when the
+    /// flow is aborted — the window is closing or the request was cancelled.
+    /// </summary>
+    private async Task<ToolConfirmationDecision?> ShowToolConfirmationAsync(
+        ToolConfirmationRequest request, CancellationToken cancellationToken)
+    {
+        if (IsDisposed || _detached)
+            return null;
+        // The dialog below is synchronous and must stay on the UI thread; the
+        // yield keeps this method genuinely asynchronous for the controller's
+        // await and preserves the SynchronizationContext hop semantics.
+        await Task.Yield();
+
+        // Read the work part identity now, on the NX UI thread, so the card
+        // shows exactly what the executor will later re-verify.
+        string? workPartFullPath = null;
+        string workPartDisplay = "（当前无活动工作部件）";
+        try
+        {
+            var snapshot = _partReader.ReadActivePart();
+            if (snapshot.HasActivePart)
+            {
+                workPartFullPath = snapshot.FullPath;
+                workPartDisplay = snapshot.FullPath ?? snapshot.DisplayName ?? "（未保存部件）";
+            }
+            else
+            {
+                MessageBox.Show(this,
+                    "当前没有活动工作部件，无法创建几何。\n请先在 NX 中打开或新建一个零件。",
+                    "NX AI Assistant", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return new ToolConfirmationDecision(false, null);
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this,
+                $"读取活动工作部件失败：{ex.Message}",
+                "NX AI Assistant", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return new ToolConfirmationDecision(false, null);
+        }
+
+        var p = request.Parameters;
+        var originText = p.OriginX == 0 && p.OriginY == 0 && p.OriginZ == 0
+            ? "(0, 0, 0)"
+            : $"({FormatMm(p.OriginX)}, {FormatMm(p.OriginY)}, {FormatMm(p.OriginZ)})";
+
+        var choice = MessageBox.Show(this,
+            "模型请求执行以下建模操作：\n\n" +
+            $"操作：创建长方体\n" +
+            $"长：{FormatMm(p.Length)} 毫米\n" +
+            $"宽：{FormatMm(p.Width)} 毫米\n" +
+            $"高：{FormatMm(p.Height)} 毫米\n" +
+            $"原点：{originText}\n" +
+            $"目标部件：{workPartDisplay}\n\n" +
+            "确认后将在该部件中创建实体（可通过 NX 撤销）。",
+            "确认建模操作",
+            MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+            MessageBoxDefaultButton.Button2);
+
+        if (IsDisposed || _detached || cancellationToken.IsCancellationRequested)
+            return null;
+
+        if (choice != DialogResult.Yes)
+            return new ToolConfirmationDecision(false, null);
+
+        _pendingConfirmation = request;
+        return new ToolConfirmationDecision(true, workPartFullPath);
+    }
+
+    private static string FormatMm(double value) =>
+        value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
     /// <summary>
     /// 开始新对话：清空聊天记录的同时清空模型上下文（外发消息完全由 ChatLog
     /// 构建，Clear 之后请求只会携带新对话内容）。已有对话内容时先确认，
@@ -598,7 +684,9 @@ public sealed class AssistantChatForm : Form
     {
         if (disposing)
         {
-            // Window is closing: drop late async results and abort any in-flight request.
+            // Window is closing: no confirmed tool call may execute after this
+            // point, and any pending confirmation card resolves as aborted.
+            _detached = true;
             _controller.Dispose();
         }
         base.Dispose(disposing);

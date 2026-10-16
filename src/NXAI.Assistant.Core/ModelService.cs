@@ -451,6 +451,298 @@ public sealed class ModelService
     }
 
     /// <summary>
+    /// Maximum tool calls accepted in a single assistant message. Parallel tool
+    /// calls are a Phase-3+ capability: one user turn may produce at most one
+    /// confirmed modeling execution, so any message carrying more than one call
+    /// is refused rather than partially executed.
+    /// </summary>
+    public const int MaxToolCallsPerMessage = 1;
+
+    /// <summary>
+    /// Chat-completions request with the tool protocol: declares the registered
+    /// tools, sends the conversation including assistant tool_calls and tool
+    /// results, and parses the assistant's reply — either plain text or tool
+    /// calls. Plain-text conversations behave exactly like
+    /// <see cref="GetChatCompletionAsync"/>.
+    /// </summary>
+    /// <param name="messages">Outbound conversation (system/user/assistant/tool).</param>
+    /// <param name="tools">Tool declarations to advertise; null or empty sends no tools.</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    public async Task<ChatCompletionResult> GetChatCompletionWithToolsAsync(
+        IReadOnlyList<OutboundMessage> messages,
+        IReadOnlyList<ToolDefinition>? tools,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(_apiBaseUrl) || string.IsNullOrWhiteSpace(_apiKey) ||
+            string.IsNullOrWhiteSpace(_modelName))
+        {
+            return ChatCompletionResult.Fail(ModelChatError.NotConfigured,
+                "模型 API 未配置：请先在“模型 API 配置”中填写 API Base URL、API Key 和模型名称。");
+        }
+
+        string fullUrl;
+        try
+        {
+            fullUrl = NormalizeChatCompletionsUrl(_apiBaseUrl);
+        }
+        catch (ArgumentException ex)
+        {
+            return ChatCompletionResult.Fail(ModelChatError.InvalidBaseUrl, ex.Message);
+        }
+
+        if (messages.Count == 0)
+        {
+            return ChatCompletionResult.Fail(ModelChatError.EmptyMessages, "没有可发送的对话消息。");
+        }
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["model"] = _modelName,
+            ["messages"] = SerializeMessages(messages),
+            ["stream"] = false,
+        };
+        if (tools is { Count: > 0 })
+        {
+            var toolObjects = new List<object>(tools.Count);
+            foreach (var tool in tools)
+            {
+                JsonElement schema;
+                try
+                {
+                    using var schemaDoc = JsonDocument.Parse(tool.ParametersJsonSchema);
+                    schema = schemaDoc.RootElement.Clone();
+                }
+                catch (JsonException)
+                {
+                    return ChatCompletionResult.Fail(ModelChatError.InvalidRequest,
+                        $"工具 {tool.Name} 的 JSON Schema 不是合法 JSON（内部错误）。");
+                }
+                toolObjects.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "function",
+                    ["function"] = new Dictionary<string, object?>
+                    {
+                        ["name"] = tool.Name,
+                        ["description"] = tool.Description,
+                        ["parameters"] = schema,
+                    },
+                });
+            }
+            payload["tools"] = toolObjects;
+        }
+
+        string json = JsonSerializer.Serialize(payload);
+
+        HttpResponseMessage response;
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(fullUrl))
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            response = await _httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return ChatCompletionResult.Fail(ModelChatError.NetworkError, "请求超时。");
+        }
+        catch (HttpRequestException ex)
+        {
+            return ChatCompletionResult.Fail(ModelChatError.NetworkError, $"网络请求失败：{ex.Message}");
+        }
+
+        using (response)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                var mapped = MapHttpStatus(response.StatusCode);
+                return ChatCompletionResult.Fail(mapped.Error, mapped.ErrorMessage);
+            }
+
+            string responseBody;
+            try
+            {
+                responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return ChatCompletionResult.Fail(ModelChatError.NetworkError, $"读取响应失败：{ex.Message}");
+            }
+
+            return ParseChatCompletionResponse(responseBody);
+        }
+    }
+
+    private static System.Collections.Generic.List<object> SerializeMessages(
+        IReadOnlyList<OutboundMessage> messages)
+    {
+        var result = new List<object>(messages.Count);
+        foreach (var message in messages)
+        {
+            if (message.Role == OutboundMessage.RoleTool)
+            {
+                result.Add(new Dictionary<string, object?>
+                {
+                    ["role"] = RoleNameTool,
+                    ["tool_call_id"] = message.ToolCallId ?? "",
+                    ["content"] = message.Content ?? "",
+                });
+                continue;
+            }
+
+            if (message.ToolCalls is { Count: > 0 })
+            {
+                result.Add(new Dictionary<string, object?>
+                {
+                    ["role"] = "assistant",
+                    ["content"] = message.Content is { Length: > 0 } ? message.Content : null,
+                    ["tool_calls"] = message.ToolCalls!.Select(call => new Dictionary<string, object?>
+                    {
+                        ["id"] = call.Id,
+                        ["type"] = "function",
+                        ["function"] = new Dictionary<string, object?>
+                        {
+                            ["name"] = call.FunctionName,
+                            ["arguments"] = call.ArgumentsJson,
+                        },
+                    }).ToArray(),
+                });
+                continue;
+            }
+
+            result.Add(new Dictionary<string, object?>
+            {
+                ["role"] = message.Role,
+                ["content"] = message.Content ?? "",
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Parses a chat-completions response body that may contain tool calls.
+    /// An assistant message with empty content and valid tool_calls is valid;
+    /// parallel tool calls (more than one) are rejected as unsupported.
+    /// </summary>
+    internal static ChatCompletionResult ParseChatCompletionResponse(string responseBody)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(responseBody);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+            {
+                return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, "模型响应中没有 choices 内容。");
+            }
+            if (!choices[0].TryGetProperty("message", out var message))
+            {
+                return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, "模型响应中没有 message。");
+            }
+
+            var toolCalls = ParseToolCalls(message, out string? toolCallError);
+            if (toolCallError != null)
+            {
+                return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, toolCallError);
+            }
+
+            string? text = null;
+            if (message.TryGetProperty("content", out var content) &&
+                content.ValueKind == JsonValueKind.String)
+            {
+                text = content.GetString();
+            }
+
+            if (toolCalls.Count > 0)
+            {
+                if (toolCalls.Count > MaxToolCallsPerMessage)
+                {
+                    return ChatCompletionResult.Fail(ModelChatError.InvalidResponse,
+                        $"模型一次请求了 {toolCalls.Count} 个工具调用；当前版本每条消息最多支持 {MaxToolCallsPerMessage} 个。");
+                }
+                return ChatCompletionResult.OkToolCalls(toolCalls);
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, "模型响应内容为空。");
+            }
+            return ChatCompletionResult.OkText(text);
+        }
+        catch (JsonException)
+        {
+            return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, "模型响应不是合法 JSON。");
+        }
+    }
+
+    private static IReadOnlyList<ParsedToolCall> ParseToolCalls(
+        JsonElement message, out string? error)
+    {
+        error = null;
+        if (!message.TryGetProperty("tool_calls", out var toolCallsElement))
+            return Array.Empty<ParsedToolCall>();
+
+        if (toolCallsElement.ValueKind != JsonValueKind.Array)
+        {
+            error = "模型响应的 tool_calls 不是数组。";
+            return Array.Empty<ParsedToolCall>();
+        }
+
+        var calls = new List<ParsedToolCall>();
+        int index = 0;
+        foreach (var callElement in toolCallsElement.EnumerateArray())
+        {
+            index++;
+            if (callElement.ValueKind != JsonValueKind.Object)
+            {
+                error = $"模型响应的第 {index} 个工具调用不是对象。";
+                return Array.Empty<ParsedToolCall>();
+            }
+            if (!callElement.TryGetProperty("function", out var function))
+            {
+                error = $"模型响应的第 {index} 个工具调用缺少 function 字段。";
+                return Array.Empty<ParsedToolCall>();
+            }
+
+            string id = callElement.TryGetProperty("id", out var idElement) &&
+                idElement.ValueKind == JsonValueKind.String
+                    ? idElement.GetString() ?? ""
+                    : "";
+            string name = function.TryGetProperty("name", out var nameElement) &&
+                nameElement.ValueKind == JsonValueKind.String
+                    ? nameElement.GetString() ?? ""
+                    : "";
+            string arguments = function.TryGetProperty("arguments", out var argsElement) &&
+                argsElement.ValueKind == JsonValueKind.String
+                    ? argsElement.GetString() ?? ""
+                    : "";
+
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                error = $"模型响应的第 {index} 个工具调用缺少 id。";
+                return Array.Empty<ParsedToolCall>();
+            }
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                error = $"模型响应的第 {index} 个工具调用缺少 function.name。";
+                return Array.Empty<ParsedToolCall>();
+            }
+            calls.Add(new ParsedToolCall(id, name, arguments));
+        }
+        return calls;
+    }
+
+    private const string RoleNameTool = "tool";
+
+    /// <summary>
     /// Default persisted-configuration path: %APPDATA%\NX AI Assistant\model-config.json.
     /// </summary>
     public static string DefaultConfigPath => Path.Combine(
