@@ -158,3 +158,12 @@
 - **主要文件**（修改）：`ChatRtfBuilder.cs`（新增，含 parser 迁移）、`AssistantChatForm.cs`（MessageItem 重写 + 右键菜单）、（删除）`ChatMarkdownRenderer.cs`、（新增测试）`ChatRtfBuilderTests.cs` 13 项。
 - **验证结果**【已核实，本轮执行】：`git diff --check` 通过；Release 构建 0 警告 0 错误；测试 **210 项 = 209 通过 / 0 失败 / 1 跳过**（跳过项需真实 NX）；NX 未运行，部署成功，4 DLL SHA-256 与 Release 一致。RTF 文本完整性有自动化证据（正文往返一致、无 ** 残留、转义注入被阻断）；**RichTextBox 实际显示/选择/复制手感属 WinForms 运行时行为，须按第九节手动验收清单在 NX2512 实测**，本轮未声称通过。
 - **遗留**：实机手动验收（八步清单）待用户执行；Phase 4 十项验收仍待执行。
+
+## 2026-10-16 · 检查点：Phase 3/4/4.1/4.2 已提交并推送（用户授权执行）
+
+- **提交**：`b1bdc90` `feat: Phase 3/4/4.1/4.2 — cylinder, cone, sphere tools, frustum support, and selectable chat rendering`——30 文件，+3023/−98；排除 `tests/TestResults/`（保持未跟踪）。
+- **推送**：`git push origin recovery/pre-review-20261014-234252` 成功（`7cf7dce..b1bdc90`，普通 fast-forward，首次重试即成功）；`git ls-remote` 复核远端 refs = `b1bdc90`，与本地一致。
+- **提交前检查**：逐文件暂存（未用 `git add .`）；暂存 diff 密钥扫描 0 命中；无临时文件入库。
+- **工作区现状**：干净（仅剩未跟踪 `tests/TestResults/`）；HEAD = 远端 = `b1bdc90`。
+- **与 main 关系**：`origin/main` = `be1716c`（用户自行前进），未合并、未推送 main——恢复分支独立，合并决策归用户。
+- **实机验收状态**：Phase 3/4/4.1/4.2 的 NX2512 实机验收仍未执行（不因提交而视为通过）。
