@@ -41,6 +41,11 @@ public static class CreateCylinderTool
             "origin_z": {
               "type": "number",
               "description": "可选。底面圆心 Z 坐标（毫米），省略时为 0。"
+            },
+            "placement": {
+              "type": "string",
+              "enum": ["global_origin", "selected_face_center"],
+              "description": "可选。放置模式：global_origin（默认）按 origin 坐标与 +Z 轴创建；selected_face_center 在用户当前选中的单个平面中心、沿该面外法向创建（此时 origin 被忽略）。仅当用户明确要求在选中面上创建时使用 selected_face_center。"
             }
           }
         }
@@ -48,6 +53,6 @@ public static class CreateCylinderTool
 
     public const string Description =
         "在当前 NX 活动工作部件中创建一个圆柱体（轴线沿 Z 轴正方向，origin 为底面圆心）。" +
-        "需要 diameter/height 与 unit；可选 origin_x/origin_y/origin_z 指定底面圆心（毫米，默认 0,0,0）。" +
+        "需要 diameter/height 与 unit；可选 origin_x/origin_y/origin_z 指定底面圆心（毫米，默认 0,0,0）；可选 placement 选择放置模式（默认 global_origin；用户要求在选中面上创建时用 selected_face_center）。" +
         "仅当用户明确要求创建圆柱体时调用；调用后需要用户在界面上确认才会执行。";
 }

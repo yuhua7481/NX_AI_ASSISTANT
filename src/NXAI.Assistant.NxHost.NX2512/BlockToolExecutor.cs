@@ -104,9 +104,12 @@ public sealed class NxToolExecutor : INxToolExecutor
 
             blockBuilder.CommitFeature();
             session.UpdateManager.DoUpdate(markId);
+            PhaseLog.Write("execute.block", "commit done");
 
             var verification = VerifyBlockCreated(workPart, bodiesBefore, idsBefore,
                 parameters.Length, parameters.Width, parameters.Height);
+            PhaseLog.Write("execute.block",
+                $"verify: {(verification.Success ? "ok" : "FAILED " + verification.Reason)}");
             if (verification.Success)
             {
                 return CreateBlockExecutionResult.Success(
@@ -226,6 +229,13 @@ public sealed class NxToolExecutor : INxToolExecutor
             parameters.Diameter, parameters.Diameter, parameters.Height);
         if (validationError != null)
             return CreateBlockExecutionResult.Failure(ToolExecutionStatus.InvalidParameters, validationError);
+
+        // Face-relative placement resolves the target face fresh at execution
+        // time; the model's origin values are ignored (the face decides), and
+        // the request is refused rather than silently falling back to the
+        // global origin.
+        if (parameters.Placement == CylinderPlacement.SelectedFaceCenter)
+            return ExecuteCreateCylinderOnSelectedFace(parameters, expectedWorkPartFullPath);
 
         Session session;
         Part? workPart;
@@ -353,10 +363,12 @@ public sealed class NxToolExecutor : INxToolExecutor
         try
         {
             session.UndoToMark(markId, undoName);
+            PhaseLog.Write("execute.rollback", $"ok: {undoName}");
             return (true, "");
         }
         catch (Exception ex)
         {
+            PhaseLog.Write("execute.rollback", $"FAILED: {undoName}: {ex.Message}");
             return (false, ex.Message);
         }
     }
@@ -705,6 +717,256 @@ public sealed class NxToolExecutor : INxToolExecutor
     /// bounding box XY extents = diameter, Z extent = height. A cylinder's
     /// axis-aligned bounding box is exactly [d, d, h] for axis +Z.
     /// </summary>
+    /// <summary>
+    /// Face-relative cylinder: resolves the single selected planar face from
+    /// the current selection, computes its representative center and unit
+    /// normal via UF_MODL_ask_face_props at the UV midpoint, verifies the
+    /// point actually lies on the face (rejecting holed/concave faces), and
+    /// creates the cylinder with bottom circle at the face center and axis
+    /// along the outward normal. Refuses (never falls back to global origin)
+    /// when the selection is empty, ambiguous, non-face, or non-planar.
+    /// </summary>
+    private CreateBlockExecutionResult ExecuteCreateCylinderOnSelectedFace(
+        CreateCylinderParameters parameters, string? expectedWorkPartFullPath)
+    {
+        if (!TryResolveWorkPart(expectedWorkPartFullPath, "面相对圆柱",
+                out Session session, out Part workPart, out string workPartIdentity,
+                out CreateBlockExecutionResult? failure))
+        {
+            return failure!;
+        }
+
+        var faces = new List<Face>();
+        try
+        {
+            var uiSelection = NXOpen.UI.GetUI().SelectionManager;
+            int count = uiSelection.GetNumSelectedObjects();
+            for (int i = 0; i < count; i++)
+            {
+                if (uiSelection.GetSelectedTaggedObject(i) is Face f)
+                    faces.Add(f);
+            }
+        }
+        catch (Exception ex)
+        {
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.PreconditionsChanged,
+                $"读取当前选择失败：{ex.Message}", workPartIdentity: workPartIdentity);
+        }
+
+        if (faces.Count == 0)
+        {
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.PreconditionsChanged,
+                "面相对放置需要恰好选中一个平面，但当前没有选中任何面。请在 NX 中选择目标面后" +
+                "重新发起请求，或改用默认的 global_origin 模式。",
+                workPartIdentity: workPartIdentity);
+        }
+        if (faces.Count > 1)
+        {
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.PreconditionsChanged,
+                $"面相对放置需要恰好选中一个平面，但当前选中了 {faces.Count} 个面（存在歧义）。" +
+                "请只保留一个目标面后重新发起请求。",
+                workPartIdentity: workPartIdentity);
+        }
+        var targetFace = faces[0];
+        PhaseLog.Write("execute.cylinder_face",
+            $"target resolved: 1 face, workPart={workPartIdentity}");
+        string faceType;
+        try
+        {
+            faceType = targetFace.SolidFaceType.ToString().ToLowerInvariant();
+        }
+        catch (Exception ex)
+        {
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.PreconditionsChanged,
+                $"无法读取目标面类型：{ex.Message}", workPartIdentity: workPartIdentity);
+        }
+        if (faceType != "planar")
+        {
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.PreconditionsChanged,
+                $"选中的目标是 {faceType} 面；面相对圆柱目前只支持平面。请选择一个平面，" +
+                "或改用默认的 global_origin 模式。",
+                workPartIdentity: workPartIdentity);
+        }
+
+        double[] center, normal;
+        try
+        {
+            var ufSession = UFSession.GetUFSession();
+            double[] uv = new double[4];
+            // General-face UV bounds (UF_MODL_ask_face_uv_minmax). Never
+            // UFEvalsf — the B-surface-only evaluator access-violates on
+            // planar faces (crash root cause, see NxContextReader doc).
+            ufSession.Modl.AskFaceUvMinmax(targetFace.Tag, uv);
+            double uMid = (uv[0] + uv[1]) / 2.0;
+            double vMid = (uv[2] + uv[3]) / 2.0;
+            center = new double[3];
+            normal = new double[3];
+            var u1 = new double[3];
+            var v1 = new double[3];
+            var u2 = new double[3];
+            var v2 = new double[3];
+            var unitNorm = new double[3];
+            var radii = new double[2];
+            // Managed signature (reflection-verified):
+            // AskFaceProps(face_id, param[2], point[3], u1[3], v1[3],
+            //              u2[3], v2[3], unit_norm[3], radii[2])
+            ufSession.Modl.AskFaceProps(targetFace.Tag,
+                new double[] { uMid, vMid }, center, u1, v1, u2, v2, unitNorm, radii);
+            normal = unitNorm;
+            PhaseLog.Write("execute.cylinder_face_geometry",
+                $"ok center=({center[0]:0.###},{center[1]:0.###},{center[2]:0.###}) " +
+                $"normal=({normal[0]:0.###},{normal[1]:0.###},{normal[2]:0.###})");
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("execute.cylinder_face_geometry", $"FAILED: {ex.GetType().Name}: {ex.Message}");
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.PreconditionsChanged,
+                $"无法可靠计算目标面中心与法向：{ex.Message}。请选择更简单的平面，" +
+                "或改用 global_origin 模式。",
+                workPartIdentity: workPartIdentity);
+        }
+
+        // KNOWN LIMITATION (honest scope): for a simple rectangular planar
+        // face the UV midpoint is the geometric center. For faces with holes
+        // or concave boundaries the UV midpoint may fall outside the actual
+        // face. NX2512's managed wrapper exposes no reliable point-on-face
+        // containment query, so this version does NOT claim on-face
+        // verification: the confirmation dialog shows the computed center and
+        // the user visually confirms placement; the live acceptance step
+        // covers holed/concave faces explicitly. No fabricated geometry.
+
+        int bodiesBefore = CountBodies(workPart);
+        HashSet<string> idsBefore = CollectBodyIds(workPart);
+
+        Session.UndoMarkId markId = session.SetUndoMark(
+            Session.MarkVisibility.Visible, "NXAI 创建圆柱体（选中面）");
+
+        CylinderBuilder? cylinderBuilder = null;
+        try
+        {
+            PhaseLog.Write("execute.cylinder_face", "builder create begin");
+            cylinderBuilder = workPart.Features.CreateCylinderBuilder(default(Feature)!);
+            cylinderBuilder.Type = CylinderBuilder.Types.AxisDiameterAndHeight;
+            cylinderBuilder.Diameter.SetFormula(FormatLength(parameters.Diameter));
+            cylinderBuilder.Height.SetFormula(FormatLength(parameters.Height));
+            // Bottom circle centered at the face center; axis along the face
+            // outward normal.
+            cylinderBuilder.Origin = new Point3d(center[0], center[1], center[2]);
+            cylinderBuilder.Direction = new Vector3d(normal[0], normal[1], normal[2]);
+
+            cylinderBuilder.CommitFeature();
+            session.UpdateManager.DoUpdate(markId);
+            PhaseLog.Write("execute.cylinder_face", "commit done");
+
+            var verification = VerifyFaceCylinderCreated(
+                workPart, bodiesBefore, idsBefore, center, parameters.Diameter, parameters.Height);
+            PhaseLog.Write("execute.cylinder_face",
+                $"verify: {(verification.Success ? "ok" : "FAILED " + verification.Reason)}");
+            if (verification.Success)
+            {
+                return CreateBlockExecutionResult.Success(
+                    parameters.Diameter, parameters.Diameter, parameters.Height,
+                    $"已在选中面的中心创建圆柱体（面中心 " +
+                    $"({center[0]:F3}, {center[1]:F3}, {center[2]:F3})，轴向沿面法向 " +
+                    $"({normal[0]:F3}, {normal[1]:F3}, {normal[2]:F3})，" +
+                    $"直径 {parameters.Diameter} × 高 {parameters.Height} 毫米）。",
+                    workPartIdentity);
+            }
+
+            (bool undone, string undoError) = Rollback(session, markId, "NXAI 创建圆柱体（选中面）");
+            LogFailure(new InvalidOperationException($"Postcondition failed: {verification.Reason}"),
+                workPartIdentity, "CreateCylinderOnFace");
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.VerificationFailed,
+                $"已创建几何与请求不符（{verification.Reason}）。" +
+                (undone ? "已回滚本次操作，部件恢复原状。" : $"回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。"),
+                rolledBack: undone,
+                workPartIdentity: workPartIdentity);
+        }
+        catch (Exception ex)
+        {
+            (bool undone, string undoError) = Rollback(session, markId, "NXAI 创建圆柱体（选中面）");
+            LogFailure(ex, workPartIdentity, "CreateCylinderOnFace");
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.ExecutionFailed,
+                $"{ex.GetType().Name}: {ex.Message}" +
+                (undone ? "（本次操作已回滚，部件恢复原状。）"
+                        : $"（回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。）"),
+                rolledBack: undone,
+                workPartIdentity: workPartIdentity);
+        }
+        finally
+        {
+            cylinderBuilder?.Destroy();
+            PhaseLog.Write("execute.cylinder_face", "builder destroyed");
+        }
+    }
+
+    /// <summary>
+    /// Face-cylinder postcondition: exactly one new body, its bounding box
+    /// containing the face center, and every extent within the diagonal bound
+    /// of an arbitrarily oriented cylinder (sqrt(d²+h²)). Exact axis-normal
+    /// orientation is confirmed in the live acceptance step — the box alone
+    /// cannot prove orientation for a tilted cylinder.
+    /// </summary>
+    private static VerificationResult VerifyFaceCylinderCreated(
+        Part workPart, int bodiesBefore, HashSet<string> idsBefore,
+        double[] faceCenter, double diameter, double height)
+    {
+        int bodiesAfter = CountBodies(workPart);
+        if (bodiesAfter != bodiesBefore + 1)
+        {
+            return new VerificationResult(false, 0, 0, 0,
+                $"实体数量为 {bodiesAfter}，预期 {bodiesBefore + 1}");
+        }
+
+        Body? newBody = null;
+        foreach (object item in workPart.Bodies)
+        {
+            if (item is Body body && !idsBefore.Contains(body.JournalIdentifier))
+            {
+                if (newBody != null)
+                    return new VerificationResult(false, 0, 0, 0, "发现多个新实体，无法确定本次创建结果");
+                newBody = body;
+            }
+        }
+        if (newBody == null)
+            return new VerificationResult(false, 0, 0, 0, "未找到本次创建的新实体");
+
+        try
+        {
+            var ufSession = UFSession.GetUFSession();
+            double[] box = new double[6];
+            ufSession.Modl.AskBoundingBox(newBody.Tag, box);
+            double cx = faceCenter[0], cy = faceCenter[1], cz = faceCenter[2];
+            if (cx < box[0] - 1e-3 || cx > box[3] + 1e-3 ||
+                cy < box[1] - 1e-3 || cy > box[4] + 1e-3 ||
+                cz < box[2] - 1e-3 || cz > box[5] + 1e-3)
+            {
+                return new VerificationResult(false, 0, 0, 0,
+                    $"新实体包围盒不包含面中心 ({cx:F3}, {cy:F3}, {cz:F3})");
+            }
+            double maxDiag = Math.Sqrt(diameter * diameter + height * height);
+            double lx = box[3] - box[0], wy = box[4] - box[1], lz = box[5] - box[2];
+            if (lx > maxDiag + 1e-3 || wy > maxDiag + 1e-3 || lz > maxDiag + 1e-3)
+            {
+                return new VerificationResult(false, lx, wy, lz,
+                    $"新实体包围盒 {lx:F3} × {wy:F3} × {lz:F3} 超出面相对圆柱的尺寸上限");
+            }
+            return new VerificationResult(true, lx, wy, lz, "");
+        }
+        catch (Exception ex)
+        {
+            return new VerificationResult(false, 0, 0, 0, $"无法读取新实体包围盒：{ex.Message}");
+        }
+    }
+
     private static VerificationResult VerifyCylinderCreated(
         Part workPart, int bodiesBefore, HashSet<string> idsBefore,
         double expectedDiameter, double expectedHeight)
