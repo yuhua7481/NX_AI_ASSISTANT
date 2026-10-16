@@ -252,3 +252,12 @@
 - **测试**：新增 ChatMessageItemLifecycleTests 7 项（STA 线程跑 WinForms 控件：正常宽度/长 Markdown 重排/气泡与标签路径/Dispose 后更新不抛/子视图先释放后更新不抛/重复 Dispose）。**321 项 = 320 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**【2026-10-16 完成】：用户确认 NX 关闭后部署 UI.dll，SHA-256 与构建产物核对一致（`f46eaa96…`）。（此前曾因 NX 运行锁定停止部署。）
 - **遗留**：面板级 ClientSizeChanged/滚动条交互无法离线覆盖→实机手动验收 6 步（Phase 7.1 报告 §4）；部署待 NX 退出。
+
+## 2026-10-16 · Phase 7.2 修复 create_extrude"不活动对象"错误（离线验证通过；实机验收待执行）
+
+- **故障**：create_sketch 成功后 create_extrude 报"试图使用不活动的对象"（NX JAM `'Attempt to use an object that is not alive'`，错误串经 LOCALIZATION/simpl_chinese/libjam 溯源）。
+- **诊断**（%TEMP% 日志实证，非推测）：① 20h 会话拉伸 commit 成功、NX 实测包围盒 (-15,-15,0)–(15,15,50) 正确，但被解析期望盒误判（Arc 分支取三维盒角点 z∈[-15,65]，多出两端 ±r）→ 回滚成功操作；② 19h 会话拉伸在 section/builder 阶段失败（无 execute.extrude 日志行=诊断盲区），推断为 Deactivate 后草图曲线作为 AddToSection seed 的存活问题（状态依赖，同代码路径 20h 成功）。
+- **修复**（仅 FeatureToolExecutor.cs）：① 期望盒极值点改在圆自身平面内取（圆心±r·平面轴，轴来自 Conic.Matrix.Element 列——与 TryGetSketchFrame 同源已核实映射）；② Section 构建前激活草图（曲线存活）后还原，新增 IsDead 存活门禁（死对象明确拒绝不再翻译为意外错误）；③ PhaseLog 补全 execute.extrude/execute.section 全阶段（resolve/frame/section/builder/commit/verify/rollback/destroy，含异常类型+首行栈）。
+- **测试**：全量 **321 项 = 320 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。验证/Section 逻辑需 NX 会话，离线不可直接单测（边界已在报告声明）。
+- **部署**：NX 未运行，NxHost.NX2512.dll 部署 SHA-256 一致（`35769ba8…`）。
+- **遗留**：实机验收 8 项（报告 §5：独立请求拉伸 d30×50、包围盒核对、两模式、失败取消路径、阶段日志核对）；缺陷 B 修复的实机有效性以验收为准（报告 §6 如实声明）。

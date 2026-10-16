@@ -469,15 +469,30 @@ public sealed partial class NxToolExecutor
     /// Creates a section from the sketch's own feature via the verified
     /// curve-feature rule; returns null with a failure reason when the sketch
     /// cannot provide one.
+    ///
+    /// Phase 7.2: the seed curve must be a LIVE object at AddToSection time.
+    /// A deactivated sketch's internal curves are consumed objects — using
+    /// one as the seed raised NX JAM "attempt to use an object that is not
+    /// alive" (试图使用不活动的对象) in live testing, session-state dependent
+    /// (a second request against the same sketch). The sketch is activated
+    /// around section construction so its curves are live, and liveness of
+    /// every passed object is verified up front. PhaseLog covers every stage
+    /// so a future failure names its stage instead of surfacing as an
+    /// untranslated exception.
     /// </summary>
     private static (Section? Section, string? Error) CreateSectionFromSketch(
         Part workPart, Sketch sketch)
     {
+        PhaseLog.Write("execute.section", "begin");
         Feature? sketchFeature = sketch.Feature;
         if (sketchFeature == null)
         {
+            PhaseLog.Write("execute.section", "FAIL: sketch has no feature");
             return (null, "草图没有关联的特征对象，无法构建截面。");
         }
+        PhaseLog.Write("execute.section",
+            $"sketchFeature={sketchFeature.JournalIdentifier} type={sketchFeature.FeatureType}");
+
         NXObject[] geometry;
         try
         {
@@ -485,18 +500,91 @@ public sealed partial class NxToolExecutor
         }
         catch (Exception ex)
         {
+            PhaseLog.Write("execute.section", $"FAIL: GetAllGeometry: {ex.GetType().Name}: {ex.Message}");
             return (null, $"无法读取草图几何作为截面种子：{ex.Message}");
         }
         var curves = geometry.OfType<ICurve>().ToList();
         if (curves.Count == 0)
+        {
+            PhaseLog.Write("execute.section", "FAIL: no curves in sketch");
             return (null, "草图中没有可用曲线，无法构建截面。");
+        }
+        PhaseLog.Write("execute.section", $"curves={curves.Count} seed={(curves[0] as NXObject)?.JournalIdentifier}");
 
-        Section section = workPart.Sections.CreateSection();
-        SelectionIntentRule[] rules =
-            { workPart.ScRuleFactory.CreateRuleCurveFeature(new[] { sketchFeature }) };
-        section.AddToSection(rules, (NXObject)curves[0], null!, null!,
-            sketch.Origin, Section.Mode.Create);
-        return (section, null);
+        // Liveness gate: every object handed to the section must be alive.
+        // A dead wrapper here is the direct cause of the JAM 'not alive'
+        // error — refuse with a precise message instead of letting NX throw.
+        foreach (var c in curves)
+        {
+            if (c is NXObject curveObj && IsDead(curveObj))
+            {
+                PhaseLog.Write("execute.section", $"FAIL: curve not alive: {curveObj.JournalIdentifier}");
+                return (null, $"草图曲线 {curveObj.JournalIdentifier} 已失效，无法作为截面。" +
+                    "请重新创建草图后再执行。");
+            }
+        }
+
+        bool activated = false;
+        try
+        {
+            // Activate so the sketch's curves are live prototype objects for
+            // the section evaluation; Deactivate returns to the committed state.
+            if (!sketch.IsActive)
+            {
+                sketch.Activate(Sketch.ViewReorient.False);
+                activated = true;
+                PhaseLog.Write("execute.section", "sketch activated for section build");
+            }
+
+            Section section = workPart.Sections.CreateSection();
+            PhaseLog.Write("execute.section", "section created");
+            SelectionIntentRule[] rules =
+                { workPart.ScRuleFactory.CreateRuleCurveFeature(new[] { sketchFeature }) };
+            section.AddToSection(rules, (NXObject)curves[0], null!, null!,
+                sketch.Origin, Section.Mode.Create);
+            PhaseLog.Write("execute.section", "addToSection ok");
+            return (section, null);
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("execute.section",
+                $"FAIL: {ex.GetType().Name}: {ex.Message} stack={(ex.StackTrace ?? "").Split('\n').FirstOrDefault() ?? ""}");
+            throw;
+        }
+        finally
+        {
+            if (activated)
+            {
+                try
+                {
+                    sketch.Deactivate(Sketch.ViewReorient.False, Sketch.UpdateLevel.Model);
+                    PhaseLog.Write("execute.section", "sketch deactivated");
+                }
+                catch (Exception ex)
+                {
+                    PhaseLog.Write("execute.section", $"WARN deactivate: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// NX liveness check: a disposed/moved-to-void wrapper or an object whose
+    /// tag no longer resolves is dead. JournalIdentifier is only read when
+    /// the object answers, so logging never triggers the JAM error itself.
+    /// </summary>
+    private static bool IsDead(NXObject obj)
+    {
+        try
+        {
+            _ = obj.Tag;
+            _ = obj.IsOccurrence;
+            return false;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     // ------------------------------------------------------------ create_extrude
@@ -520,16 +608,29 @@ public sealed partial class NxToolExecutor
 
         Sketch? sketch;
         string? sketchError;
+        PhaseLog.Write("execute.extrude", $"resolve begin ref={parameters.SketchRef}");
         (sketch, sketchError) = ResolveSketchRef(workPart, parameters.SketchRef);
         if (sketch == null)
         {
+            PhaseLog.Write("execute.extrude", $"resolve FAIL: {sketchError}");
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.PreconditionsChanged, sketchError!,
+                workPartIdentity: workPartIdentity);
+        }
+        PhaseLog.Write("execute.extrude",
+            $"resolve ok id={sketch.JournalIdentifier} name={sketch.Name} active={sketch.IsActive} workPart={workPartIdentity}");
+        if (IsDead(sketch))
+        {
+            PhaseLog.Write("execute.extrude", "resolve FAIL: sketch object not alive");
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.PreconditionsChanged,
+                "草图对象已失效（不存活），无法拉伸。请重新创建草图后再执行。",
                 workPartIdentity: workPartIdentity);
         }
 
         if (!TryGetSketchFrame(sketch, out Vector3d sketchNormal, out string frameError))
         {
+            PhaseLog.Write("execute.extrude", $"frame FAIL: {frameError}");
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.PreconditionsChanged, frameError,
                 workPartIdentity: workPartIdentity);
@@ -549,9 +650,13 @@ public sealed partial class NxToolExecutor
         {
             var (section, sectionError) = CreateSectionFromSketch(workPart, sketch);
             if (section == null)
+            {
+                PhaseLog.Write("execute.extrude", $"section FAIL: {sectionError}");
                 throw new InvalidOperationException(sectionError!);
+            }
 
             extrudeBuilder = workPart.Features.CreateExtrudeBuilder(null!);
+            PhaseLog.Write("execute.extrude", "builder created");
             extrudeBuilder.Section = section;
             extrudeBuilder.Direction = workPart.Directions.CreateDirection(
                 sketch.Origin, direction, SmartObject.UpdateOption.WithinModeling);
@@ -563,15 +668,16 @@ public sealed partial class NxToolExecutor
             session.UpdateManager.DoUpdate(markId);
             PhaseLog.Write("execute.extrude", "commit done");
 
-            double half = parameters.Distance / 2.0;
-            var centerOffset = new Vector3d(direction.X * half, direction.Y * half, direction.Z * half);
             var box = ComputeProfileExtrudeAabb(sketch, parameters.Distance, direction);
 
             var verification = VerifyNewBodyByAabb(workPart, bodiesBefore, idsBefore,
                 box, "拉伸体");
+            PhaseLog.Write("execute.extrude",
+                $"verify: {(verification.Success ? "ok" : "FAILED " + verification.Reason)}");
             if (!verification.Success)
             {
                 (bool undone, string undoError) = Rollback(session, markId, "NXAI 创建拉伸");
+                PhaseLog.Write("execute.extrude", $"rolled back: {verification.Reason}");
                 LogFailure(new InvalidOperationException($"Extrude postcondition failed: {verification.Reason}"),
                     workPartIdentity, "CreateExtrude");
                 return CreateBlockExecutionResult.Failure(
@@ -597,6 +703,8 @@ public sealed partial class NxToolExecutor
         }
         catch (Exception ex)
         {
+            PhaseLog.Write("execute.extrude",
+                $"FAIL: {ex.GetType().Name}: {ex.Message} stack={(ex.StackTrace ?? "").Split('\n').FirstOrDefault() ?? ""}");
             (bool undone, string undoError) = Rollback(session, markId, "NXAI 创建拉伸");
             LogFailure(ex, workPartIdentity, "CreateExtrude");
             return CreateBlockExecutionResult.Failure(
@@ -608,6 +716,7 @@ public sealed partial class NxToolExecutor
         finally
         {
             extrudeBuilder?.Destroy();
+            PhaseLog.Write("execute.extrude", "builder destroyed");
         }
     }
 
@@ -659,6 +768,10 @@ public sealed partial class NxToolExecutor
     /// bounds (from its curves) swept along the extrude direction.
     /// Computed from the actual sketch curves, not from the request — so a
     /// mismatch between sketch content and request is caught, not masked.
+    /// Circle points are the extreme points ON THE ARC'S OWN PLANE
+    /// (center ± r·xDir / ± r·yDir), never a 3D box-corner set: the corners
+    /// would wrongly extend the box along the plane normal by ±r, which
+    /// rejected a correct cylinder in live testing (Phase 7.2 root cause).
     /// </summary>
     private static (double MinX, double MinY, double MinZ, double MaxX, double MaxY, double MaxZ)
         ComputeProfileExtrudeAabb(Sketch sketch, double distance, Vector3d direction)
@@ -675,11 +788,20 @@ public sealed partial class NxToolExecutor
                     break;
                 case Arc arc:
                 {
-                    // Conservative full-circle bounds around the arc center.
+                    // Extreme points of the circle lie in the arc's plane:
+                    // center ± r·xDir and center ± r·yDir. Arc exposes its
+                    // plane via the inherited Conic.Matrix (NXMatrix.Element
+                    // Matrix3x3, columns = local axes — same verified mapping
+                    // as TryGetSketchFrame).
                     double r = arc.Radius;
                     var c = arc.CenterPoint;
-                    pts.Add(new Point3d(c.X - r, c.Y - r, c.Z - r));
-                    pts.Add(new Point3d(c.X + r, c.Y + r, c.Z + r));
+                    var m = arc.Matrix.Element;
+                    var x = new Vector3d(m.Xx, m.Yx, m.Zx);
+                    var y = new Vector3d(m.Xy, m.Yy, m.Zy);
+                    pts.Add(new Point3d(c.X + r * x.X, c.Y + r * x.Y, c.Z + r * x.Z));
+                    pts.Add(new Point3d(c.X - r * x.X, c.Y - r * x.Y, c.Z - r * x.Z));
+                    pts.Add(new Point3d(c.X + r * y.X, c.Y + r * y.Y, c.Z + r * y.Z));
+                    pts.Add(new Point3d(c.X - r * y.X, c.Y - r * y.Y, c.Z - r * y.Z));
                     break;
                 }
             }
