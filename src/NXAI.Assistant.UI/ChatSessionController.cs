@@ -300,36 +300,99 @@ public sealed class ChatSessionController : IDisposable
                 $"工具 {call.FunctionName} 未注册，本次请求未执行。当前可用工具：create_block。");
         }
 
-        if (call.FunctionName != CreateBlockTool.Name)
+        if (call.FunctionName != CreateBlockTool.Name &&
+            call.FunctionName != CreateCylinderTool.Name &&
+            call.FunctionName != CreateConeTool.Name &&
+            call.FunctionName != CreateSphereTool.Name)
         {
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.UnknownTool,
                 $"工具 {call.FunctionName} 没有对应的执行器，本次请求未执行。");
         }
 
-        var parser = new CreateBlockRequestParser();
-        var parameters = parser.ParseParameters(call.ArgumentsJson, out string? parseError);
-        if (parameters == null)
+        ToolConfirmationRequest request;
+        if (call.FunctionName == CreateBlockTool.Name)
         {
-            return CreateBlockExecutionResult.Failure(
-                ToolExecutionStatus.InvalidParameters,
-                $"参数校验未通过，未创建任何几何。{parseError}");
+            var blockParameters = new CreateBlockRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (blockParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            _chatLog.Add(ChatRole.Info,
+                $"模型请求创建长方体：长 {FormatNumber(blockParameters.Length)} × " +
+                $"宽 {FormatNumber(blockParameters.Width)} × 高 {FormatNumber(blockParameters.Height)} 毫米" +
+                (blockParameters.OriginX == 0 && blockParameters.OriginY == 0 && blockParameters.OriginZ == 0
+                    ? "，原点 (0, 0, 0)。"
+                    : $"，原点 ({FormatNumber(blockParameters.OriginX)}, {FormatNumber(blockParameters.OriginY)}, {FormatNumber(blockParameters.OriginZ)})。") +
+                "等待你的确认。");
+            request = ToolConfirmationRequest.ForBlock(call.Id, call.FunctionName, blockParameters);
+        }
+        else if (call.FunctionName == CreateCylinderTool.Name)
+        {
+            var cylinderParameters = new CreateCylinderRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (cylinderParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            _chatLog.Add(ChatRole.Info,
+                $"模型请求创建圆柱体：直径 {FormatNumber(cylinderParameters.Diameter)} × " +
+                $"高 {FormatNumber(cylinderParameters.Height)} 毫米，轴向 +Z" +
+                (cylinderParameters.OriginX == 0 && cylinderParameters.OriginY == 0 && cylinderParameters.OriginZ == 0
+                    ? "，底面圆心 (0, 0, 0)。"
+                    : $"，底面圆心 ({FormatNumber(cylinderParameters.OriginX)}, {FormatNumber(cylinderParameters.OriginY)}, {FormatNumber(cylinderParameters.OriginZ)})。") +
+                "等待你的确认。");
+            request = ToolConfirmationRequest.ForCylinder(call.Id, call.FunctionName, cylinderParameters);
+        }
+        else if (call.FunctionName == CreateConeTool.Name)
+        {
+            var coneParameters = new CreateConeRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (coneParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            string coneShape = coneParameters.TopDiameter > 0
+                ? $"圆台：底面直径 {FormatNumber(coneParameters.BaseDiameter)} × 顶部直径 {FormatNumber(coneParameters.TopDiameter)} × 高 {FormatNumber(coneParameters.Height)} 毫米"
+                : $"圆锥体：底面直径 {FormatNumber(coneParameters.BaseDiameter)} × 高 {FormatNumber(coneParameters.Height)} 毫米（锥顶收敛）";
+            _chatLog.Add(ChatRole.Info,
+                $"模型请求创建{coneShape}，轴向 +Z" +
+                (coneParameters.OriginX == 0 && coneParameters.OriginY == 0 && coneParameters.OriginZ == 0
+                    ? "，底面圆心 (0, 0, 0)。"
+                    : $"，底面圆心 ({FormatNumber(coneParameters.OriginX)}, {FormatNumber(coneParameters.OriginY)}, {FormatNumber(coneParameters.OriginZ)})。") +
+                "等待你的确认。");
+            request = ToolConfirmationRequest.ForCone(call.Id, call.FunctionName, coneParameters);
+        }
+        else
+        {
+            var sphereParameters = new CreateSphereRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (sphereParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            _chatLog.Add(ChatRole.Info,
+                $"模型请求创建球体：直径 {FormatNumber(sphereParameters.Diameter)} 毫米" +
+                (sphereParameters.CenterX == 0 && sphereParameters.CenterY == 0 && sphereParameters.CenterZ == 0
+                    ? "，球心 (0, 0, 0)。"
+                    : $"，球心 ({FormatNumber(sphereParameters.CenterX)}, {sphereParameters.CenterY:F3}, {sphereParameters.CenterZ:F3})。") +
+                "等待你的确认。");
+            request = ToolConfirmationRequest.ForSphere(call.Id, call.FunctionName, sphereParameters);
         }
 
-        _chatLog.Add(ChatRole.Info,
-            $"模型请求创建长方体：长 {FormatNumber(parameters.Length)} × " +
-            $"宽 {FormatNumber(parameters.Width)} × 高 {FormatNumber(parameters.Height)} 毫米" +
-            (parameters.OriginX == 0 && parameters.OriginY == 0 && parameters.OriginZ == 0
-                ? "，原点 (0, 0, 0)。"
-                : $"，原点 ({FormatNumber(parameters.OriginX)}, {FormatNumber(parameters.OriginY)}, {FormatNumber(parameters.OriginZ)})。") +
-            "等待你的确认。");
-
-        var request = new ToolConfirmationRequest
-        {
-            ToolCallId = call.Id,
-            ToolName = call.FunctionName,
-            Parameters = parameters,
-        };
         var decision = await _confirmationHandler(request, cancellationToken);
         if (decision == null)
         {
@@ -350,7 +413,17 @@ public sealed class ChatSessionController : IDisposable
             throw new OperationCanceledException(cancellationToken);
         }
 
-        return _toolExecutor!.ExecuteCreateBlock(parameters, decision.ExpectedWorkPartFullPath);
+        return request.ParametersKind switch
+        {
+            ToolParametersKind.Block => _toolExecutor!.ExecuteCreateBlock(
+                request.BlockParameters!, decision.ExpectedWorkPartFullPath),
+            ToolParametersKind.Cylinder => _toolExecutor!.ExecuteCreateCylinder(
+                request.CylinderParameters!, decision.ExpectedWorkPartFullPath),
+            ToolParametersKind.Cone => _toolExecutor!.ExecuteCreateCone(
+                request.ConeParameters!, decision.ExpectedWorkPartFullPath),
+            _ => _toolExecutor!.ExecuteCreateSphere(
+                request.SphereParameters!, decision.ExpectedWorkPartFullPath),
+        };
     }
 
     private static string FormatNumber(double value) =>

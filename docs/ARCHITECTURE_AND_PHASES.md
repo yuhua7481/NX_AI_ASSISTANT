@@ -100,7 +100,7 @@ Compatibility Manifest + Installer/Updater
 | Settings | **已实现并实机验收**（TableLayoutPanel、DPAPI 密钥、留空保留） |
 | Conversation Orchestrator | **已实现并实机验收**（ChatSessionController：多轮历史、取消、生命周期保护 + 工具回合状态机：每回合至多一次建模执行、2 回合上限） |
 | Direct Provider HTTP Client | **已实现**（OpenAI 兼容 Chat Completions、URL 规范化、错误分类 + tools 声明与 tool_calls 解析）；流式输出未实现 |
-| Typed NX Tool Registry / Dispatcher / Postcondition Verification | **已实现并实机验收**（create_block 唯一工具）：Core 契约/注册表 + NxHost `NxToolExecutor`（无 SaveAs、UndoMark 回滚、UF 包围盒验证、毫米部件门禁、部件变化拒绝）；八项实机验收通过（2026-10-16，用户报告） |
+| Typed NX Tool Registry / Dispatcher / Postcondition Verification | **已实现（create_block + create_cylinder 两工具）**：Core 契约/注册表 + NxHost `NxToolExecutor`（无 SaveAs、UndoMark 回滚、UF 包围盒验证、毫米部件门禁、部件变化拒绝）。create_block 八项实机验收通过（2026-10-16，用户报告）；create_cylinder 源码+测试完成，实机待验收 |
 | Attachments | 未实现（阶段 5） |
 
 **AI 驱动建模闭环已建立并经用户 NX2512 实机验收通过（2026-10-16，八项；证据为用户报告）。**
@@ -139,6 +139,8 @@ Compatibility Manifest + Installer/Updater
 ## 阶段 4：常用零件特征
 
 逐个引入孔、拉伸、圆角、倒角、阵列、参数修改等操作。每项通过真实 NX 集成验收后才对模型开放。
+
+> 注：create_cylinder（圆柱体）已按此模式先行交付（2026-10-16，源码+测试完成，实机验收待执行），见 reports/PHASE_3_CREATE_CYLINDER.md。
 
 ## 阶段 5：附件与工程打包
 

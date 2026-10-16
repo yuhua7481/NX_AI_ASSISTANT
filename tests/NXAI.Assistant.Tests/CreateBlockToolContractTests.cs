@@ -16,14 +16,16 @@ public class CreateBlockToolContractTests
     // ------------------------------------------------------------- registry
 
     [Fact]
-    public void Registry_ContainsOnlyCreateBlock()
+    public void Registry_ContainsCreateBlock()
     {
         var registry = CreateBlockTool.CreateRegistry();
         var tools = registry.All;
-        Assert.Single(tools);
-        Assert.Equal(CreateBlockTool.Name, tools[0].Name);
+        Assert.Equal(4, tools.Count);
         Assert.True(registry.IsRegistered("create_block"));
-        Assert.False(registry.IsRegistered("create_cylinder"));
+        Assert.True(registry.IsRegistered("create_cylinder"));
+        Assert.True(registry.IsRegistered("create_cone"));
+        Assert.True(registry.IsRegistered("create_sphere"));
+        Assert.False(registry.IsRegistered("create_torus"));
         Assert.False(registry.IsRegistered(""));
         Assert.False(registry.IsRegistered(null!));
     }

@@ -118,3 +118,43 @@
 - **提交前检查**：逐文件暂存（未用 `git add .`）；暂存 diff 密钥扫描 0 命中；无暂存临时文件。
 - **工作区现状**：干净（仅剩未跟踪 `tests/TestResults/` 调试产物）；HEAD = 远端 = `6b030bb`。
 - **与 main 关系**：`origin/main` 仍 `14c27d4`，未合并、未推送 main——保持恢复分支独立，合并决策归用户。
+
+## 2026-10-16 · 阶段 3：create_cylinder 圆柱体工具（源码 + 离线测试 + 部署核验完成）
+
+- **任务**：新增第二个受控建模工具 `create_cylinder`，复用现有工具注册/确认/回填机制（无平行框架）；真实 NX 实机验收待用户执行。本任务未授权 Git 操作，成果未提交。
+- **主要文件**（修改）：`CreateBlockTool.cs`（注册双工具）、`NxToolExecutor.cs`（接口 +ExecuteCreateCylinder）、`BlockToolExecutor.cs`（圆柱执行 + VerifyCylinderCreated + Rollback/LogFailure 参数化）、`ChatSessionController.cs`（按工具名分派解析与执行）、`AssistantChatForm.cs`（确认卡按类型显示）、`CreateBlockToolContractTests.cs`、`ChatSessionControllerToolTests.cs`。（新增）`CreateCylinderSchema.cs`、`CreateCylinderTool.cs`、`GeometryToolJson.cs`、`CreateCylinderToolContractTests.cs`、`reports/PHASE_3_CREATE_CYLINDER.md`。
+- **解决的问题**：① NXOpen 事实核验先行（XML 文档 + managed_core 元数据探测）：CylinderBuilder `Type=AxisDiameterAndHeight`、Diameter/Height 为 Expression（SetFormula 设值）、Origin 为 Point3d（底面圆心）、Direction 默认 +Z（实现保持 builder 默认，模型不可自选轴向）；② 单位换算与字段校验抽为 `GeometryToolJson` 共享助手（block/cylinder 复用，界限沿用 BlockRequestValidator 未放宽，直径同时约束 X/Y）；③ 执行后验证：实体计数差=1 + JournalIdentifier 差集 + UF 包围盒 X/Y=直径、Z=高（容差 0.01mm），体积校验未加（MeasureManager 实机稳定性未验证，不引入不可靠估算）；④ 确认卡按 ParametersKind 分支显示（圆柱：直径/高/原点(底面圆心)/+Z 轴），未重构界面；⑤ 混合工具序列由回合上限安全拒绝。
+- **验证结果**【已核实，本轮执行】：`git diff --check` 通过；Release 构建 0 警告 0 错误；测试 **165 项 = 164 通过 / 0 失败 / 1 跳过**（跳过项为需真实 NX 的旧验收测试）；部署 4 DLL SHA-256 与 Release 一致；build.ps1 不触碰用户配置。
+- **遗留**：① 九项实机验收待用户执行（重点：CylinderBuilder.SetFormula 真实行为、圆柱包围盒读数、create_block 无回归）；② GitHub 本轮多次 ls-remote 连接失败（远端状态未实测确认）；③ 工作区 Phase 3 成果未提交（本任务未授权 Git 操作）。
+- **报告**：[reports/PHASE_3_CREATE_CYLINDER.md](reports/PHASE_3_CREATE_CYLINDER.md)。
+
+## 2026-10-16 · 阶段 4：四种基本体统一协调框架 + create_cone/create_sphere（源码 + 测试完成）
+
+- **任务**：把 block/cylinder/cone/sphere 四种基本体放入统一协调框架（复用现有注册表/解析/确认/回填机制，无 shape 字符串分发）；新增圆锥与球体；保留 block/cylinder 既有行为。实机验收与部署复制待用户配合执行；本任务未授权 Git 操作，成果未提交。
+- **开始前保护**：新备份 `D:\AI\NX_AI_ASSISTANT_backup_20261016_092605`（含 Phase 3 未提交成果，仓库外）；`git ls-remote` 核验成功——远端 recovery 分支 = 本地 `7cf7dce`（Phase 2 检查点已同步确认）。
+- **主要文件**（修改）：`CreateBlockTool.cs`（4 工具注册）、`NxToolExecutor.cs`（接口 +cone/sphere）、`BlockToolExecutor.cs`（+ExecuteCreateCone/ExecuteCreateSphere；前置检查抽为 TryResolveWorkPart 共享；Rollback/LogFailure 参数化；+VerifyConeCreated/VerifySphereCreated）、`ToolConfirmationFlow.cs`（ForCone/ForSphere）、`ChatSessionController.cs`（四工具类型化分派）、`AssistantChatForm.cs`（确认卡四分支）、2 个旧契约测试、`ChatSessionControllerToolTests.cs`（fake 执行器扩展 + 新用例）。（新增）`CreateConeTool.cs`、`CreateConeSchema.cs`、`CreateSphereTool.cs`、`CreateSphereSchema.cs`、`CreateConeToolContractTests.cs`、`reports/PHASE_4_PRIMITIVES_FRAMEWORK.md`。
+- **NXOpen 事实核验**（XML 文档 + 元数据探测）：ConeBuilder `DiametersAndHeight`（builder 默认）+ `TopDiameter.Value=0` 为文档默认合法值（真圆锥）；放置经 `Axes.CreateAxis(Point, Direction, UpdateOption)`（ConeBuilder 无 Origin 属性，签名核实）；SphereBuilder `CenterPointAndDiameter`（CenterPoint 为 NXOpen.Point，经 PointCollection.CreatePoint）。体积校验（MeasureManager）未加——实机稳定性未验证不引入不可靠估算。
+- **验证结果**【已核实，本轮执行】：`git diff --check` 通过；Release 构建 0 警告 0 错误；测试 **170 项 = 169 通过 / 0 失败 / 1 跳过**（跳过项需真实 NX）；用户退出 NX 后重跑 `build.ps1` 部署成功，4 DLL SHA-256 与 Release 一致。
+- **遗留**：① 十项实机验收（圆锥/球体目视形状核对为关键项）；② 工作区未提交（未授权）。
+- **报告**：[reports/PHASE_4_PRIMITIVES_FRAMEWORK.md](reports/PHASE_4_PRIMITIVES_FRAMEWORK.md)。
+
+## 2026-10-16 · Phase 4.1：create_cone 支持圆台（top_diameter）+ 聊天 Markdown 显示修复
+
+- **任务**：① `create_cone` 增加可选 `top_diameter`（0 或省略=标准圆锥；0 < top < base=圆台；负值/≥底面/NaN/Infinity/越界拒绝）——复用既有 ConeBuilder DiametersAndHeight 路径（TopDiameter=0 是文档默认合法值，真圆锥），SetFormula 设实际值；确认卡与结果消息区分"圆台/圆锥体"。② 聊天 Markdown 显示：模型回复中 `**加粗**`、`-/* 列表`、空行分段原样显示星号——新增 `ChatMarkdownParser`（显示层解析：成对 `**` 且内容首尾非空格才为粗体，CommonMark flanking 规则，杂散星号保持字面）+ `ChatMarkdownRenderer`（每行 FlowLayoutPanel + 逐 run Label，行内粗体真实生效）；仅 Info 短提示保持纯 Label。原始消息全文保留在 ChatLog（复制/tooltip/模型上下文不受影响），不解析 HTML、不改聊天 UI 结构。
+- **开始前保护**：新备份 `D:\AI\NX_AI_ASSISTANT_backup_20261016_101242`（含 Phase 4 全部未提交成果）；旧备份未动；未执行 Git 操作。
+- **主要文件**（修改）：`CreateConeTool.cs`（+TopDiameter 参数与校验）、`CreateConeSchema.cs`（schema+描述）、`BlockToolExecutor.cs`（SetFormula 实际值、形状名区分、回滚名区分）、`ChatSessionController.cs`（圆台 Info 文案）、`AssistantChatForm.cs`（MessageItem 渲染改 Markdown 视图 + 确认卡圆台分支）、`NXAI.Assistant.UI.csproj`（InternalsVisibleTo 测试）、`ChatSessionControllerToolTests.cs`（圆台用例 2 项）。（新增）`ChatMarkdownRenderer.cs`、`ChatMarkdownParserTests.cs`（10 项）、`CreateConeToolContractTests.cs`（13 项——补上 Phase 4 漏建的 cone 契约测试文件，Phase 4 报告中该数字有误，本次更正）。
+- **验证结果**【已核实，本轮执行】：`git diff --check` 通过；Release 构建 0 警告 0 错误；测试 **197 项 = 196 通过 / 0 失败 / 1 跳过**（跳过项需真实 NX）；NX 未运行，部署成功，4 DLL SHA-256 与 Release 一致。
+- **遗留**：真实 NX2512 验收待用户执行（圆台几何 + Markdown 显示 + 四形状无回归）；Phase 4 十项验收仍待执行。
+
+## 2026-10-16 · Phase 4.2：聊天正文改只读 RichTextBox（修复文本错位/缺失 + 选择复制）
+
+- **任务背景**：Phase 4.1 的 FlowLayoutPanel + 多 Label 拼接方案在实际运行中文字片段缺失、拼接错位、布局挤压；消息不可选择。根因（代码审查）：行内强制换行 spacer（Width≈int.MaxValue/4）在限宽 FlowLayoutPanel 中引发溢出，后续控件被挤出布局；Label 天生不可选择。
+- **修复**：消息正文改用**只读 RichTextBox**（无边框、背景色随气泡/正文、WordWrap、ScrollBars=None）+ 程序生成 RTF：
+  - 新增 `ChatRtfBuilder.cs`（含 `ChatMarkdownParser`/`ChatMarkdownRun`/`ChatMarkdownBlock`，自旧渲染器迁入）：`**粗体**`（CommonMark flanking 规则）、`- `/* ` 列表（\bullet）、段落（\par）、行内换行（\line）；所有非 ASCII 以 \uN? 转义（中文/emoji 不丢字）；`{}\` 转义、控制字符丢弃——模型输出无法注入 RTF 控制字。
+  - `AssistantChatForm.MessageItem`：user/assistant/error 正文 = RichTextBox；ContentsResized 驱动高度自适应（+2 边距防末行隐藏）；ApplyViewportWidth 重设宽度并重灌 RTF 触发重排。Info 短提示保持纯 Label（无需选择）。
+  - 右键菜单升级：**复制**（有选中复制选中，无选中复制整条）、**全选**、**复制整条消息**；RichTextBox ShortcutsEnabled=true，Ctrl+C 原生（窗体 KeyPreview 无全局拦截）。复制内容为纯文本（SelectedText），不含 RTF 控制码。
+  - 删除 `ChatMarkdownRenderer.cs`（Label 拼接方案整体移除）。
+- **开始前保护**：新备份 `D:\AI\NX_AI_ASSISTANT_backup_20261016_105917`；旧备份未动；未执行 Git 操作。
+- **主要文件**（修改）：`ChatRtfBuilder.cs`（新增，含 parser 迁移）、`AssistantChatForm.cs`（MessageItem 重写 + 右键菜单）、（删除）`ChatMarkdownRenderer.cs`、（新增测试）`ChatRtfBuilderTests.cs` 13 项。
+- **验证结果**【已核实，本轮执行】：`git diff --check` 通过；Release 构建 0 警告 0 错误；测试 **210 项 = 209 通过 / 0 失败 / 1 跳过**（跳过项需真实 NX）；NX 未运行，部署成功，4 DLL SHA-256 与 Release 一致。RTF 文本完整性有自动化证据（正文往返一致、无 ** 残留、转义注入被阻断）；**RichTextBox 实际显示/选择/复制手感属 WinForms 运行时行为，须按第九节手动验收清单在 NX2512 实测**，本轮未声称通过。
+- **遗留**：实机手动验收（八步清单）待用户执行；Phase 4 十项验收仍待执行。

@@ -75,8 +75,45 @@ public class ChatSessionControllerToolTests
             CallCount++;
             LastParameters = parameters;
             LastExpectedPath = expectedWorkPartFullPath;
+            LastToolName = "create_block";
             return Result;
         }
+
+        public CreateBlockExecutionResult ExecuteCreateCylinder(
+            CreateCylinderParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            LastCylinderParameters = parameters;
+            LastExpectedPath = expectedWorkPartFullPath;
+            LastToolName = "create_cylinder";
+            return Result;
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateCone(
+            CreateConeParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            LastConeParameters = parameters;
+            LastExpectedPath = expectedWorkPartFullPath;
+            LastToolName = "create_cone";
+            return Result;
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateSphere(
+            CreateSphereParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            LastSphereParameters = parameters;
+            LastExpectedPath = expectedWorkPartFullPath;
+            LastToolName = "create_sphere";
+            return Result;
+        }
+
+        public CreateConeParameters? LastConeParameters { get; private set; }
+        public CreateSphereParameters? LastSphereParameters { get; private set; }
+        public string? LastToolName { get; private set; }
+
+        public CreateCylinderParameters? LastCylinderParameters { get; private set; }
 
         public CreateBlockParameters? LastParameters { get; private set; }
         public string? LastExpectedPath { get; private set; }
@@ -426,8 +463,266 @@ public class ChatSessionControllerToolTests
 
         Assert.Equal(1, sender.RequestCount);
         Assert.Equal(0, executor.CallCount);
-        Assert.Single(sender.ToolDeclarations[0]!);   // create_block advertised
+        Assert.Equal(4, sender.ToolDeclarations[0]!.Count); // four tools advertised
         Assert.Equal(2, log.Messages.Count);
         Assert.Equal(ChatRole.Assistant, log.Messages[1].Role);
+    }
+
+    // ------------------------------------------------------ create_cylinder
+
+    private const string CylinderCallJson =
+        """{"diameter":40,"height":25,"unit":"mm"}""";
+
+    [Fact]
+    public async Task Cylinder_confirm_executes_exactly_once_and_feeds_structured_result()
+    {
+        var (controller, sender, log, executor, gate) = Create();
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_cylinder", args: CylinderCallJson),
+            () => ChatCompletionResult.OkText("已创建圆柱体。"));
+
+        controller.StartSend("创建直径 40 高 25 毫米的圆柱");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal("create_cylinder", executor.LastToolName);
+        Assert.Equal(2, sender.RequestCount);
+
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("success", payload.GetProperty("status").GetString());
+        // The counting executor returns its canned verification (100/60/20);
+        // the point is that the verified values, not the requested ones,
+        // reach the model.
+        Assert.Equal(20, payload.GetProperty("verifiedDimensionsMm").GetProperty("height").GetDouble());
+
+        // tool_call_id 关联保持一致。
+        Assert.Equal("call_1", sender.Requests[1][2].ToolCallId);
+
+        // Typed parameters reached the executor in mm.
+        Assert.NotNull(executor.LastCylinderParameters);
+        Assert.Equal(40, executor.LastCylinderParameters!.Diameter);
+        Assert.Equal("mm", executor.LastCylinderParameters.Unit);
+        Assert.Equal("D:\\part.prt", executor.LastExpectedPath);
+
+        Assert.Contains(log.Messages, m => m.Role == ChatRole.Assistant && m.Text == "已创建圆柱体。");
+    }
+
+    [Fact]
+    public async Task Cylinder_user_cancel_executes_nothing()
+    {
+        var (controller, sender, log, executor, gate) = Create();
+        gate.EnqueuePending(out var pending);
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_cylinder", args: CylinderCallJson),
+            () => ChatCompletionResult.OkText("已取消。"));
+
+        controller.StartSend("创建圆柱体");
+        await UntilAsync(() => gate.Requests.Count > 0);
+        Assert.Equal(ToolParametersKind.Cylinder, gate.Requests[0].ParametersKind);
+        pending.TrySetResult(new ToolConfirmationDecision(false, null));
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.CallCount);
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("user_cancelled", payload.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Cylinder_invalid_arguments_rejected_without_executor_call()
+    {
+        var (controller, sender, _, executor, _) = Create();
+        sender.Enqueue(
+            ScriptedSender.ToolCall(name: "create_cylinder",
+                args: """{"diameter":-5,"height":25,"unit":"mm"}"""),
+            () => ChatCompletionResult.OkText("参数无效。"));
+
+        controller.StartSend("创建圆柱体");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.CallCount);
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("invalid_parameters", payload.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Cylinder_extra_field_rejected_without_executor_call()
+    {
+        var (controller, sender, _, executor, _) = Create();
+        sender.Enqueue(
+            ScriptedSender.ToolCall(name: "create_cylinder",
+                args: """{"diameter":40,"height":25,"unit":"mm","file_path":"D:\\\\x.prt"}"""),
+            () => ChatCompletionResult.OkText("不支持的字段。"));
+
+        controller.StartSend("创建圆柱体");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.CallCount);
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("invalid_parameters", payload.GetProperty("status").GetString());
+        Assert.Contains("file_path", payload.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task Mixed_tool_calls_never_execute_two_tools_in_one_turn()
+    {
+        // Round 1: cylinder call (confirmed, executed). Round 2 (final): block
+        // call — must be refused by the round cap, never confirmed/executed.
+        var (controller, sender, log, executor, gate) = Create();
+        sender.Enqueue(
+            ScriptedSender.ToolCall(name: "create_cylinder", args: CylinderCallJson),
+            ScriptedSender.ToolCall(id: "call_2", name: "create_block"));
+        gate.EnqueuePending(out var pending);
+
+        controller.StartSend("先圆柱后长方体");
+        await UntilAsync(() => gate.Requests.Count > 0);
+        pending.TrySetResult(new ToolConfirmationDecision(true, "D:/part.prt"));
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.CallCount);                     // only the cylinder
+        Assert.Equal("create_cylinder", executor.LastToolName);
+        Assert.Equal(2, sender.RequestCount);                    // capped
+        Assert.Single(gate.Requests);                            // round-2 call never reached confirmation
+        Assert.Equal(ChatRole.Error, log.Messages[^1].Role);
+    }
+
+    [Fact]
+    public async Task Frustum_confirm_shows_typed_parameters_and_executes_once()
+    {
+        var (controller, sender, log, executor, gate) = Create();
+        sender.Enqueue(
+            ScriptedSender.ToolCall(name: "create_cone",
+                args: """{"base_diameter":40,"top_diameter":20,"height":20,"unit":"mm"}"""),
+            () => ChatCompletionResult.OkText("已创建圆台。"));
+
+        controller.StartSend("创建底 40 顶 20 高 20 的圆台");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal("create_cone", executor.LastToolName);
+        Assert.NotNull(executor.LastConeParameters);
+        Assert.Equal(40, executor.LastConeParameters!.BaseDiameter);
+        Assert.Equal(20, executor.LastConeParameters.TopDiameter);
+        Assert.Equal(20, executor.LastConeParameters.Height);
+        Assert.Equal(2, sender.RequestCount);
+
+        // Info card and confirmation request call it a frustum (圆台), not a cone.
+        Assert.Contains(log.Messages, m => m.Role == ChatRole.Info && m.Text.Contains("圆台"));
+        Assert.Contains(log.Messages, m => m.Role == ChatRole.Assistant && m.Text == "已创建圆台。");
+    }
+
+    [Fact]
+    public async Task Frustum_top_over_base_rejected_without_executor_call()
+    {
+        var (controller, sender, _, executor, _) = Create();
+        sender.Enqueue(
+            ScriptedSender.ToolCall(name: "create_cone",
+                args: """{"base_diameter":40,"top_diameter":50,"height":20,"unit":"mm"}"""),
+            () => ChatCompletionResult.OkText("参数无效。"));
+
+        controller.StartSend("创建圆台");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.CallCount);
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("invalid_parameters", payload.GetProperty("status").GetString());
+        Assert.Contains("小于 base_diameter", payload.GetProperty("message").GetString());
+    }
+
+    // --------------------------------------------- create_cone / create_sphere
+
+    private const string ConeCallJson =
+        """{"base_diameter":50,"height":30,"unit":"mm"}""";
+    private const string SphereCallJson =
+        """{"diameter":30,"unit":"mm"}""";
+
+    [Fact]
+    public async Task Cone_confirm_executes_once_with_typed_parameters()
+    {
+        var (controller, sender, log, executor, gate) = Create();
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_cone", args: ConeCallJson),
+            () => ChatCompletionResult.OkText("已创建圆锥体。"));
+
+        controller.StartSend("创建底面直径 50 高 30 毫米的圆锥");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal("create_cone", executor.LastToolName);
+        Assert.NotNull(executor.LastConeParameters);
+        Assert.Equal(50, executor.LastConeParameters!.BaseDiameter);
+        Assert.Equal(30, executor.LastConeParameters.Height);
+        Assert.Equal(2, sender.RequestCount);
+        Assert.Equal("call_1", sender.Requests[1][2].ToolCallId);
+        Assert.Contains(log.Messages, m => m.Role == ChatRole.Info && m.Text.Contains("圆锥"));
+        Assert.Contains(log.Messages, m => m.Role == ChatRole.Assistant && m.Text == "已创建圆锥体。");
+    }
+
+    [Fact]
+    public async Task Cone_invalid_arguments_rejected_without_executor_call()
+    {
+        var (controller, sender, _, executor, _) = Create();
+        sender.Enqueue(
+            ScriptedSender.ToolCall(name: "create_cone",
+                args: """{"base_diameter":0,"height":25,"unit":"mm"}"""),
+            () => ChatCompletionResult.OkText("参数无效。"));
+
+        controller.StartSend("创建圆锥体");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.CallCount);
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("invalid_parameters", payload.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Sphere_confirm_executes_once_and_feeds_verified_result()
+    {
+        var (controller, sender, log, executor, gate) = Create();
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_sphere",
+                args: """{"diameter":50,"unit":"mm"}"""),
+            () => ChatCompletionResult.OkText("已创建球体。"));
+
+        controller.StartSend("创建直径 50 毫米的球");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal("create_sphere", executor.LastToolName);
+        Assert.NotNull(executor.LastSphereParameters);
+        Assert.Equal(50, executor.LastSphereParameters!.Diameter);
+
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("success", payload.GetProperty("status").GetString());
+        Assert.Equal(20, payload.GetProperty("verifiedDimensionsMm").GetProperty("height").GetDouble());
+        Assert.Equal("call_1", sender.Requests[1][2].ToolCallId);
+    }
+
+    [Fact]
+    public async Task Sphere_cancel_executes_nothing()
+    {
+        var (controller, sender, _, executor, gate) = Create();
+        gate.EnqueuePending(out var pending);
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_sphere",
+                args: """{"diameter":50,"unit":"mm"}"""));
+
+        controller.StartSend("创建球体");
+        await UntilAsync(() => gate.Requests.Count > 0);
+        Assert.Equal(ToolParametersKind.Sphere, gate.Requests[0].ParametersKind);
+        pending.TrySetResult(new ToolConfirmationDecision(false, null));
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.CallCount);
+    }
+
+    [Fact]
+    public async Task Four_tools_all_registered_and_advertised()
+    {
+        var (controller, sender, log, executor, _) = Create();
+        sender.Enqueue(() => ChatCompletionResult.OkText("普通回复"));
+
+        controller.StartSend("你好");
+        await WaitForCompletedAsync(controller);
+
+        var tools = sender.ToolDeclarations[0]!;
+        Assert.Equal(4, tools.Count);
+        Assert.Equal(
+            new HashSet<string> { "create_block", "create_cylinder", "create_cone", "create_sphere" },
+            tools.Select(t => t.Name).ToHashSet());
     }
 }

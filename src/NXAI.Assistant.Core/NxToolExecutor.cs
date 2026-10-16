@@ -50,7 +50,7 @@ public sealed class CreateBlockExecutionResult
 }
 
 /// <summary>
-/// Executes a registered modeling tool inside the NX process. Implementations
+/// Executes registered modeling tools inside the NX process. Implementations
 /// must run on the NX UI thread, validate parameters before touching the
 /// session, and verify postconditions against real geometry — never trusting
 /// the caller or an absence of exceptions. No method here may save, rename,
@@ -65,4 +65,26 @@ public interface INxToolExecutor
     /// </summary>
     CreateBlockExecutionResult ExecuteCreateBlock(
         CreateBlockParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a cylinder (axis +Z, origin = bottom-face center) in the current
+    /// work part. Same confirmation/precondition contract as the block.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateCylinder(
+        CreateCylinderParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a right circular cone (axis +Z, apex above the base, origin =
+    /// bottom-face center) in the current work part. Same confirmation /
+    /// precondition contract as the block.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateCone(
+        CreateConeParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a real spherical solid (origin = sphere center) in the current
+    /// work part. Same confirmation/precondition contract as the block.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateSphere(
+        CreateSphereParameters parameters, string? expectedWorkPartFullPath);
 }

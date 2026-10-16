@@ -12,6 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="NXAI.Assistant.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\NXAI.Assistant.Core\NXAI.Assistant.Core.csproj" />
   </ItemGroup>
 

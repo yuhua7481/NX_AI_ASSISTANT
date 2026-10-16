@@ -319,9 +319,15 @@ public sealed class AssistantChatForm : Form
         root.Controls.Add(sidebar);
         Controls.Add(root);
 
-        var copyItem = new ToolStripMenuItem { Text = "复制文本" };
+        var copyItem = new ToolStripMenuItem { Text = "复制整条消息" };
         copyItem.Click += (_, _) => CopyMessageUnderMenu();
         _copyMenu.Items.Add(copyItem);
+        var copySelectionItem = new ToolStripMenuItem { Text = "复制" };
+        copySelectionItem.Click += (_, _) => CopySelectedUnderMenu();
+        _copyMenu.Items.Add(copySelectionItem);
+        var selectAllItem = new ToolStripMenuItem { Text = "全选" };
+        selectAllItem.Click += (_, _) => SelectAllUnderMenu();
+        _copyMenu.Items.Add(selectAllItem);
 
         Activated += (_, _) => RefreshActivePart();
         RefreshActivePart();
@@ -424,17 +430,65 @@ public sealed class AssistantChatForm : Form
             return new ToolConfirmationDecision(false, null);
         }
 
-        var p = request.Parameters;
-        var originText = p.OriginX == 0 && p.OriginY == 0 && p.OriginZ == 0
-            ? "(0, 0, 0)"
-            : $"({FormatMm(p.OriginX)}, {FormatMm(p.OriginY)}, {FormatMm(p.OriginZ)})";
+        string operationText;
+        string dimensionsText;
+        string originText;
+        switch (request.ParametersKind)
+        {
+            case ToolParametersKind.Cylinder:
+            {
+                var c = request.CylinderParameters!;
+                operationText = "创建圆柱体（轴向 +Z）";
+                dimensionsText = $"直径：{FormatMm(c.Diameter)} 毫米\n高：{FormatMm(c.Height)} 毫米";
+                originText = c.OriginX == 0 && c.OriginY == 0 && c.OriginZ == 0
+                    ? "(0, 0, 0)"
+                    : $"({FormatMm(c.OriginX)}, {FormatMm(c.OriginY)}, {FormatMm(c.OriginZ)})（底面圆心）";
+                break;
+            }
+            case ToolParametersKind.Cone:
+            {
+                var c = request.ConeParameters!;
+                if (c.TopDiameter > 0)
+                {
+                    operationText = "创建圆台（轴向 +Z，截头锥体）";
+                    dimensionsText = $"底面直径：{FormatMm(c.BaseDiameter)} 毫米\n顶部直径：{FormatMm(c.TopDiameter)} 毫米\n高：{FormatMm(c.Height)} 毫米";
+                }
+                else
+                {
+                    operationText = "创建正圆锥体（轴向 +Z，锥顶朝上）";
+                    dimensionsText = $"底面直径：{FormatMm(c.BaseDiameter)} 毫米\n高：{FormatMm(c.Height)} 毫米";
+                }
+                originText = c.OriginX == 0 && c.OriginY == 0 && c.OriginZ == 0
+                    ? "(0, 0, 0)"
+                    : $"({FormatMm(c.OriginX)}, {FormatMm(c.OriginY)}, {FormatMm(c.OriginZ)})（底面圆心）";
+                break;
+            }
+            case ToolParametersKind.Sphere:
+            {
+                var s = request.SphereParameters!;
+                operationText = "创建球体";
+                dimensionsText = $"直径：{FormatMm(s.Diameter)} 毫米";
+                originText = s.CenterX == 0 && s.CenterY == 0 && s.CenterZ == 0
+                    ? "(0, 0, 0)"
+                    : $"({FormatMm(s.CenterX)}, {FormatMm(s.CenterY)}, {FormatMm(s.CenterZ)})（球心）";
+                break;
+            }
+            default:
+            {
+                var p = request.BlockParameters!;
+                operationText = "创建长方体";
+                dimensionsText = $"长：{FormatMm(p.Length)} 毫米\n宽：{FormatMm(p.Width)} 毫米\n高：{FormatMm(p.Height)} 毫米";
+                originText = p.OriginX == 0 && p.OriginY == 0 && p.OriginZ == 0
+                    ? "(0, 0, 0)"
+                    : $"({FormatMm(p.OriginX)}, {FormatMm(p.OriginY)}, {FormatMm(p.OriginZ)})";
+                break;
+            }
+        }
 
         var choice = MessageBox.Show(this,
             "模型请求执行以下建模操作：\n\n" +
-            $"操作：创建长方体\n" +
-            $"长：{FormatMm(p.Length)} 毫米\n" +
-            $"宽：{FormatMm(p.Width)} 毫米\n" +
-            $"高：{FormatMm(p.Height)} 毫米\n" +
+            $"操作：{operationText}\n" +
+            $"{dimensionsText}\n" +
             $"原点：{originText}\n" +
             $"目标部件：{workPartDisplay}\n\n" +
             "确认后将在该部件中创建实体（可通过 NX 撤销）。",
@@ -588,20 +642,42 @@ public sealed class AssistantChatForm : Form
         });
     }
 
+    /// <summary>复制光标所在消息内选中的文本（无选中则复制整条）。</summary>
+    private void CopySelectedUnderMenu()
+    {
+        if (_copyMenu.SourceControl is RichTextBox box && box.SelectionLength > 0)
+        {
+            CopyTextToClipboard(box.SelectedText);
+            return;
+        }
+        CopyMessageUnderMenu();
+    }
+
+    private void SelectAllUnderMenu()
+    {
+        if (_copyMenu.SourceControl is RichTextBox box)
+            box.SelectAll();
+    }
+
+    private static void CopyTextToClipboard(string text)
+    {
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (ExternalException)
+        {
+            // 剪贴板被其他进程瞬时锁定：放弃本次复制，不弹错误。
+        }
+    }
+
     private void CopyMessageUnderMenu()
     {
         for (Control? control = _copyMenu.SourceControl; control != null; control = control.Parent)
         {
             if (control is MessageItem item)
             {
-                try
-                {
-                    Clipboard.SetText(item.MessageText);
-                }
-                catch (ExternalException)
-                {
-                    // 剪贴板被其他进程瞬时锁定：放弃本次复制，不弹错误。
-                }
+                CopyTextToClipboard(item.MessageText);
                 return;
             }
         }
@@ -703,45 +779,68 @@ public sealed class AssistantChatForm : Form
         private const int BubblePadV = 10;
         private const int SideMargin = 24;
 
-        private readonly Label _textLabel;
+        private readonly Control _bodyView;
+        private readonly RichTextBox? _bodyRichText;
         private readonly Panel? _bubble;
+        private readonly string _rawText;
+        private readonly Font _bodyFont;
+        private int _viewWidth;
 
         public ChatRole Role { get; }
-        public string MessageText => _textLabel.Text;
+
+        /// <summary>原始消息全文（复制整条/工具提示使用，不含渲染变换）。</summary>
+        public string MessageText => _rawText;
 
         public MessageItem(ChatMessage message, ToolTip toolTip, ContextMenuStrip copyMenu)
         {
             Role = message.Role;
+            _rawText = message.Text;
             Dock = DockStyle.Top;
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             BackColor = ChatPalette.MainBg;
             Padding = new Padding(0, 5, 0, 5);
 
-            _textLabel = new Label
+            bool isInfo = message.Role == ChatRole.Info;
+            _bodyFont = isInfo ? SmallFont : BodyFont;
+
+            // Info lines are single short status strings: keep the plain label
+            // (no selection needed). User/assistant/error get a read-only
+            // RichTextBox with markdown rendering — selectable and copyable.
+            if (isInfo)
             {
-                AutoSize = true,
-                MaximumSize = new Size(400, 0),
-                Text = message.Text,
-                Font = message.Role == ChatRole.Info ? SmallFont : BodyFont,
-                ForeColor = ChatPalette.BodyText,
-            };
+                _bodyView = new Label
+                {
+                    AutoSize = true,
+                    Text = message.Text,
+                    Font = SmallFont,
+                    ForeColor = ChatPalette.HeaderText,
+                    BackColor = Color.Transparent,
+                };
+            }
+            else
+            {
+                bool isError = message.Role == ChatRole.Error;
+                _bodyRichText = CreateMessageTextBox(
+                    message.Text, _bodyFont,
+                    isError ? ChatPalette.ErrorText : ChatPalette.BodyText,
+                    isError ? ChatPalette.ErrorBubble : ChatPalette.UserBubble);
+                _bodyView = _bodyRichText;
+            }
+            _bodyView.Margin = Padding.Empty;
 
             bool hasBubble = message.Role is ChatRole.User or ChatRole.Error;
             if (hasBubble)
             {
-                bool isError = message.Role == ChatRole.Error;
                 _bubble = new Panel
                 {
                     AutoSize = true,
                     AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                    BackColor = isError ? ChatPalette.ErrorBubble : ChatPalette.UserBubble,
-                    Padding = new Padding(0, 0, BubblePadH, BubblePadV),
+                    BackColor = _bodyRichText!.BackColor,
+                    Padding = new Padding(BubblePadH, BubblePadV, BubblePadH, BubblePadV),
                     Location = new Point(SideMargin, 5),
                 };
-                _textLabel.ForeColor = isError ? ChatPalette.ErrorText : ChatPalette.BodyText;
-                _textLabel.Location = new Point(BubblePadH, BubblePadV);
-                _bubble.Controls.Add(_textLabel);
+                _bubble.Controls.Add(_bodyView);
                 Controls.Add(_bubble);
                 _bubble.SizeChanged += (_, _) =>
                 {
@@ -753,25 +852,63 @@ public sealed class AssistantChatForm : Form
             }
             else
             {
-                _textLabel.Location = new Point(SideMargin, 5);
-                if (message.Role == ChatRole.Info)
-                {
-                    _textLabel.Font = SmallFont;
-                    _textLabel.ForeColor = ChatPalette.HeaderText;
-                }
-                Controls.Add(_textLabel);
+                _bodyView.Location = new Point(SideMargin, 5);
+                Controls.Add(_bodyView);
             }
 
-            toolTip.SetToolTip(_textLabel, $"时间：{message.TimestampUtc.LocalDateTime:HH:mm:ss}");
-            _textLabel.ContextMenuStrip = copyMenu;
+            toolTip.SetToolTip(_bodyView, $"时间：{message.TimestampUtc.LocalDateTime:HH:mm:ss}");
+            _bodyView.ContextMenuStrip = copyMenu;
             ContextMenuStrip = copyMenu;
 
             Layout += (_, _) => RepositionByRole();
         }
 
         /// <summary>
-        /// 视口宽度变化时重新计算换行宽度。设置 MaximumSize 触发 Label 重新测量，
-        /// 气泡与卡片 AutoSize 随之重排，因此窗口缩放不会产生水平裁切。
+        /// Creates a borderless read-only RichTextBox whose RTF body carries
+        /// the markdown rendering (bold, bullets, paragraphs). Selection and
+        /// Ctrl+C work natively; the control auto-sizes to its wrapped text
+        /// height via ContentsResized.
+        /// </summary>
+        private static RichTextBox CreateMessageTextBox(
+            string text, Font font, Color textColor, Color backColor)
+        {
+            var box = new RichTextBox
+            {
+                BorderStyle = BorderStyle.None,
+                BackColor = backColor,
+                ForeColor = textColor,
+                Font = font,
+                ReadOnly = true,
+                TabStop = false,
+                Cursor = Cursors.IBeam,
+                Margin = Padding.Empty,
+                DetectUrls = false,
+                EnableAutoDragDrop = false,
+                ShortcutsEnabled = true,
+                WordWrap = true,
+                ScrollBars = RichTextBoxScrollBars.None,
+            };
+            ApplyMarkdownToBox(box, text, font.Size);
+            box.ContentsResized += (_, e) =>
+            {
+                // RichTextBox needs the +2 padding around ContentsRectangle to
+                // avoid a hidden last line; width is driven by the parent.
+                box.ClientSize = new Size(
+                    Math.Max(box.ClientSize.Width, e.NewRectangle.Width + 2),
+                    e.NewRectangle.Height + 2);
+            };
+            return box;
+        }
+
+        private static void ApplyMarkdownToBox(RichTextBox box, string text, float fontSizePt)
+        {
+            box.Rtf = ChatRtfBuilder.Build(text, fontSizePt);
+        }
+
+        /// <summary>
+        /// 视口宽度变化时重新计算换行宽度。RichTextBox 在设定宽度后按
+        /// WordWrap 自然换行，ContentsResized 驱动高度自适应；气泡 AutoSize
+        /// 随之重排，因此窗口缩放不会产生水平裁切。
         /// </summary>
         public void ApplyViewportWidth(int viewportWidth)
         {
@@ -783,8 +920,19 @@ public sealed class AssistantChatForm : Form
                 _ => viewportWidth - 2 * SideMargin - bubbleChrome,
             };
             int width = Math.Max(160, Math.Min(660, roleBudget));
-            if (_textLabel.MaximumSize.Width != width)
-                _textLabel.MaximumSize = new Size(width, 0);
+            if (_viewWidth == width)
+                return;
+            _viewWidth = width;
+            if (_bodyRichText != null)
+            {
+                _bodyRichText.Width = width;
+                // Force a relayout so ContentsResized fires with the new wrap.
+                ApplyMarkdownToBox(_bodyRichText, _rawText, _bodyFont.Size);
+            }
+            else
+            {
+                _bodyView.MaximumSize = new Size(width, 0);
+            }
         }
 
         private void RepositionByRole()
@@ -796,15 +944,15 @@ public sealed class AssistantChatForm : Form
                         _bubble.Left = Math.Max(SideMargin, ClientSize.Width - SideMargin - _bubble.Width);
                     break;
                 case ChatRole.Info:
-                    _textLabel.Left = Math.Max(SideMargin,
-                        (ClientSize.Width - _textLabel.Width) / 2);
+                    _bodyView.Left = Math.Max(SideMargin,
+                        (ClientSize.Width - _bodyView.Width) / 2);
                     break;
                 case ChatRole.Error:
                     if (_bubble != null)
                         _bubble.Left = SideMargin;
                     break;
                 default:
-                    _textLabel.Left = SideMargin;
+                    _bodyView.Left = SideMargin;
                     break;
             }
         }

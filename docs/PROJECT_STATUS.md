@@ -19,29 +19,31 @@
 
 ## 当前阶段
 
-**阶段 2（类型化工具调用 + create_block 建模工具）已完成：源码、离线测试、部署核验，以及用户执行的 NX2512 八项实机验收（2026-10-16 报告通过）。AI 驱动建模闭环成立。**
+**阶段 4（四种基本体统一协调框架 + create_cone + create_sphere）源码、离线测试、部署核验完成（2026-10-16）；实机十项验收待用户执行。**
 
-- 工具契约与注册表（仅 `create_block`）：源码确认 + 自动化测试通过 + 实机验收通过（用户报告）。
-- ModelService 工具协议（tools 声明 / tool_calls 解析 / tool 消息序列化）：源码确认 + 自动化测试通过（纯文本路径无回归）+ 实机通过。
-- 安全建模入口（无 SaveAs/自动保存，UndoMark 回滚，UF 包围盒执行后验证）：源码确认（2026-10-16 归档轮复核）+ 自动化测试通过 + 实机验收通过（创建/取消/非法参数/失败恢复/部件切换，用户报告）。
-- 确认 UI 与回合状态机：源码确认 + 自动化测试通过 + 实机通过（确认流、部件切换中止、退出清理）。
-- 阶段 1 全部成果（聊天 UI / 模型对话 / 配置 / 部件只读）：实机通过（2026-10-15 六项）。
+- 四工具统一注册（block/cylinder/cone/sphere）与类型化分派：源码确认 + 自动化测试通过。
+- create_cone（正圆锥，ConeBuilder DiametersAndHeight + TopDiameter=0 文档默认合法值）：源码确认 + 离线测试通过；**实机待验收**。
+- create_sphere（真实球形实体，CenterPointAndDiameter）：源码确认 + 离线测试通过；**实机待验收**。
+- 确认卡四形状分型显示（圆锥/圆台区分）、公共执行骨架（TryResolveWorkPart/Rollback/LogFailure）：源码确认 + 自动化测试通过。
+- **聊天正文渲染（Phase 4.1 引入、4.2 重构为只读 RichTextBox）**：加粗/列表/分段 RTF 渲染 + 原生选择/Ctrl+C/右键复制（复制整条消息/复制/全选）；RTF 文本完整性有自动化证据（往返一致、注入阻断）；实机显示与选择复制手感待手动验收。
+- create_block / create_cylinder：实机验收通过（用户报告），本阶段保持无回归（测试固化）。
 
 ## 当前分支与工作区
 
-- 分支：`recovery/pre-review-20261014-234252`（主分支：`main`）；本地 HEAD = `9cfd87a`（无 Phase 2 提交）。
-- 远端：`origin/recovery/pre-review-20261014-234252` 最后已知为 `9cfd87a`（Phase 1 成果）；`origin/main` = `14c27d4`（本地 `main` 仍 `af4340d`，不同步）。**2026-10-16 归档轮 `git ls-remote` 连接 GitHub 失败（网络不可达），远端实际状态待网络恢复后确认**。
-- **工作区有未提交修改（Phase 2 全部成果）**：13 个已跟踪修改 + 12 个未跟踪文件（含 `tests/TestResults/` 临时产物，提交时应排除）；截至 2026-10-16 归档未 commit——等待用户授权；**未经用户明确授权不得提交**。完整清单与分类见 `WORK_LOG.md` 2026-10-16 收尾条目。
+- 分支：`recovery/pre-review-20261014-234252`（主分支：`main`）；本地 HEAD = `7cf7dce`（Phase 2 检查点，已推送）。
+- 远端：Phase 2 检查点已推送（`6b030bb`+`7cf7dce`，2026-10-16 用户授权执行）。Phase 3 开始时 `git ls-remote` 再次连接失败（GitHub 间歇性不可达）——远端当前状态未实测确认，Phase 3 成果**未提交未推送**（本任务未授权 Git 操作）。
+- **工作区有未提交修改（Phase 3 全部成果）**：源码 7 改 + 3 新增、测试 2 改 + 1 新增、文档 3 改 + 1 新增（详见 `WORK_LOG.md` 2026-10-16 Phase 3 条目）；**未经用户明确授权不得提交**。
 
 ## 最新已核实验证结果
 
 | 项目 | 结果 | 对应工作区状态 | 证据 |
 |---|---|---|---|
-| Release 构建 | 通过，0 警告 0 错误 | 当前工作区（Phase 2 全部修改），2026-10-15/16 构建核验；**归档轮（2026-10-16）未重跑** | 上一会话 `dotnet build` + `build.ps1` |
-| 自动化测试 | **144 项：143 通过 / 0 失败 / 1 跳过**（最近报告，2026-10-15/16；归档轮未重新执行） | 同上 | `dotnet test` 输出；跳过项为需真实 NX 的 `CreateBlock_ValidParameters_SucceedsInNX`（按设计跳过） |
-| 部署 DLL 一致性 | 4 个部署 DLL 与 Release 产物 SHA-256 一致（2026-10-15/16 部署后核验；归档轮未重跑） | 同上 | 上一会话哈希比对 |
-| **NX2512 实机八项验收** | **全部通过（用户报告，2026-10-16）**：① 取消确认→无几何变化 ② 确认创建→实体出现 ③ 实测尺寸/包围盒与请求一致 ④ 部件路径未变、未自动保存 ⑤ 非法尺寸请求被结构化拒绝 ⑥ 再次有效请求成功 ⑦ 工作部件切换后确认→中止并重提示 ⑧ NX 退出时窗口不挂起（Phase 1 遗留项一并验证） | 当前部署产物 | 用户实测报告（对话内确认，未附截图/日志存档） |
-| 安全边界复核 | 通过（2026-10-16 归档轮，源码复核，见 WORK_LOG 同日条目） | 当前工作区 | 逐项代码检查：新入口无 SaveAs/自动保存；旧 CreateBlock 未接入 AI 路径；确认门禁/部件校验/结构化拒绝/回滚均落实；无密钥入码 |
+| Release 构建 | 通过，0 警告 0 错误 | 当前工作区（Phase 4 全部修改），2026-10-16 本轮执行 | `dotnet build NXAIAssistant.sln -c Release` |
+| 自动化测试 | **210 项：209 通过 / 0 失败 / 1 跳过**（Phase 4.2 后） | 同上，2026-10-16 本轮执行 | `dotnet test`；跳过项为需真实 NX 的 `CreateBlock_ValidParameters_SucceedsInNX`（按设计跳过） |
+| 部署 DLL 一致性 | 4 个部署 DLL 与 Release 产物 SHA-256 一致（NX 退出后重跑部署成功） | 同上，2026-10-16 | `build.ps1` 部署后哈希比对 |
+| **NX2512 实机验收（Phase 2 八项）** | **全部通过（用户报告，2026-10-16）** | Phase 2 部署产物 | 用户实测报告（对话内确认） |
+| NX2512 实机验收（Phase 3 九项） | **未执行**（create_cylinder 待用户在一次性测试部件验收） | 当前部署产物 | 待用户实测 |
+| 安全边界复核 | Phase 2 通过（2026-10-16 归档轮）；Phase 3 同骨架复用（同一执行器类、同一确认门禁、同一回滚/验证路径） | 当前工作区 | 逐项代码检查 |
 
 历史测试数据（27/96/129 项等）属于当时的中间工作区，不代表当前结果；演进见 `WORK_LOG.md`。
 
@@ -59,9 +61,9 @@
 
 ## 下一项唯一建议任务
 
-**Phase 2 版本检查点：将全部待同步文件提交并普通推送到 `origin/recovery/pre-review-20261014-234252`**（待用户授权后执行；不合并 main、不强制推送）。检查点准备清单已输出（见 WORK_LOG 2026-10-16 条目）。提交完成后再决定下一开发阶段（活动零件上下文查询或第二个建模工具，由用户决定）。
+**Phase 4 实机验收**（部署已完成、4 DLL 哈希一致）：用户在一次性测试部件执行十项验收（见 `reports/PHASE_4_PRIMITIVES_FRAMEWORK.md` §7，重点第 3/4 项目视核对真锥体与球形）。通过后更新本文件并决定版本检查点。
 
-**不要在检查点之前扩大建模工具范围。**
+**实机验收前不要扩大建模工具范围（不做第五种形状）。**
 
 ## 详细文档索引
 
@@ -74,6 +76,8 @@
 | [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) | 每个可交付版本的检查清单 |
 | [reports/PHASE_1_CHAT_AND_UI_ACCEPTANCE.md](reports/PHASE_1_CHAT_AND_UI_ACCEPTANCE.md) | 阶段 1 详细报告（对话链路 + UI + 验收） |
 | [reports/PHASE_2_TOOL_CALLING_AND_CREATE_BLOCK.md](reports/PHASE_2_TOOL_CALLING_AND_CREATE_BLOCK.md) | 阶段 2 详细报告（工具调用 + create_block + 确认/验证） |
+| [reports/PHASE_3_CREATE_CYLINDER.md](reports/PHASE_3_CREATE_CYLINDER.md) | 阶段 3 详细报告（create_cylinder 契约/执行/验证/测试） |
+| [reports/PHASE_4_PRIMITIVES_FRAMEWORK.md](reports/PHASE_4_PRIMITIVES_FRAMEWORK.md) | 阶段 4 详细报告（四形状统一框架 + cone/sphere） |
 | [reports/EXTERNAL_API_DIAGNOSTICS.md](reports/EXTERNAL_API_DIAGNOSTICS.md) | 外部模型/LiteLLM 排查记录（与本项目测试分开） |
 | [PHASE_0_REPORT.md](PHASE_0_REPORT.md) | 阶段 0 交付报告（2026-10-13） |
 | [TECHNICAL_SPIKE_RESULTS.md](TECHNICAL_SPIKE_RESULTS.md) | 阶段 0 技术事实与证据分级 |
