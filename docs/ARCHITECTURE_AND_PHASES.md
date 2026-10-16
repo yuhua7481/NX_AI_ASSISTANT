@@ -102,6 +102,7 @@ Compatibility Manifest + Installer/Updater
 | Direct Provider HTTP Client | **已实现**（OpenAI 兼容 Chat Completions、URL 规范化、错误分类 + tools 声明与 tool_calls 解析）；流式输出未实现 |
 | Typed NX Tool Registry / Dispatcher / Postcondition Verification | **已实现（create_block + create_cylinder 两工具）**：Core 契约/注册表 + NxHost `NxToolExecutor`（无 SaveAs、UndoMark 回滚、UF 包围盒验证、毫米部件门禁、部件变化拒绝）。create_block 八项实机验收通过（2026-10-16，用户报告）；create_cylinder 源码+测试完成，实机待验收 |
 | NX Context Awareness（Phase 5） | **源码 + 离线测试完成**：NxContextSnapshot DTO（Core）+ NxContextReader 采集（NxHost，选择分类/面中心法向/WCS/视图）+ 每轮 system 摘要注入；面相对圆柱（selected_face_center）。实机待验收 |
+| Sketch/Extrude/Revolve/Boolean（Phase 7） | **源码 + 离线测试 + 部署完成**：create_sketch（选中平面/基准面或 WCS 基本平面 + 矩形/圆，受控 sketchRef）、create_extrude（法向拉伸，解析 AABB 验证）、create_revolve（显式轴+平面内校验+包络验证）、boolean_operation（三运算，受控体引用）。API 经本机程序集元数据+XML 文档核验。实机待验收（Phase 7 报告 §7） |
 | Execution Modes（Phase 6） | **源码 + 离线测试 + 部署完成**：Core `ExecutionMode` 策略/允许清单/持久化（%APPDATA%\NX AI Assistant\execution-mode.json）、控制器分派阶段授权（自主模式仅四基本体跳过确认，执行前重查模式）、UI 橙色滑动开关（文字标签表达状态、DPI/键盘/无障碍）。实机待验收（Phase 6 报告 §7） |
 | Attachments | 未实现（阶段 5 顺延） |
 

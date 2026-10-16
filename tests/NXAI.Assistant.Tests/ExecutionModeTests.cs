@@ -143,13 +143,17 @@ public class ExecutionModeTests : IDisposable
     // ------------------------------------------------------------ allowlist
 
     [Fact]
-    public void Allowlist_ContainsExactlyTheFourRegisteredCreateTools()
+    public void Allowlist_ContainsExactlyTheEightRegisteredModelingTools()
     {
-        Assert.Equal(4, AutonomousToolAllowlist.Tools.Count);
+        Assert.Equal(8, AutonomousToolAllowlist.Tools.Count);
         Assert.Contains(CreateBlockTool.Name, AutonomousToolAllowlist.Tools);
         Assert.Contains(CreateCylinderTool.Name, AutonomousToolAllowlist.Tools);
         Assert.Contains(CreateConeTool.Name, AutonomousToolAllowlist.Tools);
         Assert.Contains(CreateSphereTool.Name, AutonomousToolAllowlist.Tools);
+        Assert.Contains(CreateSketchTool.Name, AutonomousToolAllowlist.Tools);
+        Assert.Contains(CreateExtrudeTool.Name, AutonomousToolAllowlist.Tools);
+        Assert.Contains(CreateRevolveTool.Name, AutonomousToolAllowlist.Tools);
+        Assert.Contains(BooleanOperationTool.Name, AutonomousToolAllowlist.Tools);
     }
 
     [Theory]

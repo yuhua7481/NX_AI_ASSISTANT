@@ -72,6 +72,18 @@ public static class CreateBlockTool
         registry.Register(new ToolDefinition(
             CreateSphereTool.Name, CreateSphereTool.Description,
             CreateSphereTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateSketchTool.Name, CreateSketchTool.Description,
+            CreateSketchTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateExtrudeTool.Name, CreateExtrudeTool.Description,
+            CreateExtrudeTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateRevolveTool.Name, CreateRevolveTool.Description,
+            CreateRevolveTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            BooleanOperationTool.Name, BooleanOperationTool.Description,
+            BooleanOperationTool.ParametersJsonSchema));
         return registry;
     }
 }

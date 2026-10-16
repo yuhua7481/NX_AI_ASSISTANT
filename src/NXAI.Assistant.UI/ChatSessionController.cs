@@ -352,13 +352,18 @@ public sealed class ChatSessionController : IDisposable
         {
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.UnknownTool,
-                $"工具 {call.FunctionName} 未注册，本次请求未执行。当前可用工具：create_block。");
+                $"工具 {call.FunctionName} 未注册，本次请求未执行。当前可用工具：" +
+                string.Join("、", AutonomousToolAllowlist.Tools) + "。");
         }
 
         if (call.FunctionName != CreateBlockTool.Name &&
             call.FunctionName != CreateCylinderTool.Name &&
             call.FunctionName != CreateConeTool.Name &&
-            call.FunctionName != CreateSphereTool.Name)
+            call.FunctionName != CreateSphereTool.Name &&
+            call.FunctionName != CreateSketchTool.Name &&
+            call.FunctionName != CreateExtrudeTool.Name &&
+            call.FunctionName != CreateRevolveTool.Name &&
+            call.FunctionName != BooleanOperationTool.Name)
         {
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.UnknownTool,
@@ -426,7 +431,7 @@ public sealed class ChatSessionController : IDisposable
                     : $"，底面圆心 ({FormatNumber(coneParameters.OriginX)}, {FormatNumber(coneParameters.OriginY)}, {FormatNumber(coneParameters.OriginZ)})。");
             request = ToolConfirmationRequest.ForCone(call.Id, call.FunctionName, coneParameters);
         }
-        else
+        else if (call.FunctionName == CreateSphereTool.Name)
         {
             var sphereParameters = new CreateSphereRequestParser()
                 .ParseParameters(call.ArgumentsJson, out string? parseError);
@@ -443,6 +448,94 @@ public sealed class ChatSessionController : IDisposable
                     ? "，球心 (0, 0, 0)。"
                     : $"，球心 ({FormatNumber(sphereParameters.CenterX)}, {sphereParameters.CenterY:F3}, {sphereParameters.CenterZ:F3})。");
             request = ToolConfirmationRequest.ForSphere(call.Id, call.FunctionName, sphereParameters);
+        }
+        else if (call.FunctionName == CreateSketchTool.Name)
+        {
+            var sketchParameters = new CreateSketchRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (sketchParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            string profileText = sketchParameters.ProfileType == SketchProfileType.Rectangle
+                ? $"矩形 {FormatNumber(sketchParameters.RectangleWidth)} × {FormatNumber(sketchParameters.RectangleHeight)} 毫米"
+                : $"圆形直径 {FormatNumber(sketchParameters.CircleDiameter)} 毫米";
+            string planeText = sketchParameters.PlaneMode switch
+            {
+                SketchPlaneMode.SelectedPlane => "用户选中的平面/基准面",
+                SketchPlaneMode.WcsXY => "绝对坐标 XY 平面",
+                SketchPlaneMode.WcsXZ => "绝对坐标 XZ 平面",
+                _ => "绝对坐标 YZ 平面",
+            };
+            requestDescription =
+                $"草图：{profileText}，平面 {planeText}" +
+                (sketchParameters.CenterU == 0 && sketchParameters.CenterV == 0
+                    ? "，轮廓中心位于平面原点。"
+                    : $"，轮廓中心偏移 (u {FormatNumber(sketchParameters.CenterU)}, v {FormatNumber(sketchParameters.CenterV)}) 毫米（草图局部坐标）。");
+            request = ToolConfirmationRequest.ForSketch(call.Id, call.FunctionName, sketchParameters);
+        }
+        else if (call.FunctionName == CreateExtrudeTool.Name)
+        {
+            var extrudeParameters = new CreateExtrudeRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (extrudeParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            requestDescription =
+                $"拉伸：草图 {extrudeParameters.SketchRef}，距离 {FormatNumber(extrudeParameters.Distance)} 毫米，" +
+                $"{(extrudeParameters.Direction == ExtrudeDirection.Reverse ? "沿法向反向" : "沿草图法向")}。";
+            request = ToolConfirmationRequest.ForExtrude(call.Id, call.FunctionName, extrudeParameters);
+        }
+        else if (call.FunctionName == CreateRevolveTool.Name)
+        {
+            var revolveParameters = new CreateRevolveRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (revolveParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            string axisText = revolveParameters.AxisMode switch
+            {
+                RevolveAxisMode.SelectedAxis => "用户选中的直线/基准轴",
+                RevolveAxisMode.WcsX => "绝对坐标 X 轴",
+                RevolveAxisMode.WcsY => "绝对坐标 Y 轴",
+                _ => "绝对坐标 Z 轴",
+            };
+            requestDescription =
+                $"旋转体：草图 {revolveParameters.SketchRef}，轴 {axisText}，{FormatNumber(revolveParameters.AngleDeg)} 度。";
+            request = ToolConfirmationRequest.ForRevolve(call.Id, call.FunctionName, revolveParameters);
+        }
+        else
+        {
+            var booleanParameters = new BooleanOperationRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (booleanParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未修改任何几何。{parseError}");
+            }
+
+            string opText = booleanParameters.Operation switch
+            {
+                BooleanOperationType.Unite => "并集",
+                BooleanOperationType.Subtract => "差集",
+                _ => "交集",
+            };
+            requestDescription =
+                $"布尔{opText}：目标体 {booleanParameters.TargetBodyRef}，工具体 {booleanParameters.ToolBodyRef}" +
+                "（运算后工具体被消耗，结果归属目标体）。";
+            request = ToolConfirmationRequest.ForBoolean(call.Id, call.FunctionName, booleanParameters);
         }
 
         // Authorization decision at the backend dispatch stage — read the
@@ -509,8 +602,16 @@ public sealed class ChatSessionController : IDisposable
                 request.CylinderParameters!, expectedWorkPartFullPath),
             ToolParametersKind.Cone => _toolExecutor!.ExecuteCreateCone(
                 request.ConeParameters!, expectedWorkPartFullPath),
-            _ => _toolExecutor!.ExecuteCreateSphere(
+            ToolParametersKind.Sphere => _toolExecutor!.ExecuteCreateSphere(
                 request.SphereParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Sketch => _toolExecutor!.ExecuteCreateSketch(
+                request.SketchParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Extrude => _toolExecutor!.ExecuteCreateExtrude(
+                request.ExtrudeParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Revolve => _toolExecutor!.ExecuteCreateRevolve(
+                request.RevolveParameters!, expectedWorkPartFullPath),
+            _ => _toolExecutor!.ExecuteBooleanOperation(
+                request.BooleanParameters!, expectedWorkPartFullPath),
         };
 
     private static string FormatNumber(double value) =>
@@ -585,6 +686,8 @@ public sealed class ChatSessionController : IDisposable
     /// <summary>
     /// Serializes the execution outcome for the model. Contains no secrets and
     /// no machine paths beyond the work part identity the user already sees.
+    /// Executor-provided DetailsJson (NXHost-managed references such as
+    /// sketchRef/newBodyRef) is merged into the top-level payload object.
     /// </summary>
     internal static string BuildToolResultPayload(CreateBlockExecutionResult result)
     {
@@ -602,6 +705,25 @@ public sealed class ChatSessionController : IDisposable
                 ["width"] = result.VerifiedWidthMm ?? 0,
                 ["height"] = result.VerifiedHeightMm ?? 0,
             };
+        }
+        if (!string.IsNullOrWhiteSpace(result.DetailsJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(result.DetailsJson);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var property in doc.RootElement.EnumerateObject())
+                    {
+                        payload[property.Name] = JsonSerializer.Deserialize<object>(property.Value.GetRawText());
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // Malformed details are never sent; the core fields above
+                // remain the source of truth.
+            }
         }
         return JsonSerializer.Serialize(payload);
     }

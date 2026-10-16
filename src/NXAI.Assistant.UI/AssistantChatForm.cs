@@ -659,6 +659,63 @@ public sealed class AssistantChatForm : Form
                     : $"({FormatMm(p.OriginX)}, {FormatMm(p.OriginY)}, {FormatMm(p.OriginZ)})";
                 break;
             }
+            case ToolParametersKind.Sketch:
+            {
+                var s = request.SketchParameters!;
+                string profileText = s.ProfileType == SketchProfileType.Rectangle
+                    ? $"矩形：宽 {FormatMm(s.RectangleWidth)} × 高 {FormatMm(s.RectangleHeight)} 毫米"
+                    : $"圆形：直径 {FormatMm(s.CircleDiameter)} 毫米";
+                string planeText = s.PlaneMode switch
+                {
+                    SketchPlaneMode.SelectedPlane => "用户当前选中的平面/基准面（执行时校验：必须恰好一个）",
+                    SketchPlaneMode.WcsXY => "绝对坐标 XY 平面",
+                    SketchPlaneMode.WcsXZ => "绝对坐标 XZ 平面",
+                    _ => "绝对坐标 YZ 平面",
+                };
+                operationText = "创建草图";
+                dimensionsText = $"{profileText}";
+                originText = s.CenterU == 0 && s.CenterV == 0
+                    ? $"平面：{planeText}\n轮廓中心：平面原点"
+                    : $"平面：{planeText}\n轮廓中心偏移（草图局部）：(u {FormatMm(s.CenterU)}, v {FormatMm(s.CenterV)})";
+                break;
+            }
+            case ToolParametersKind.Extrude:
+            {
+                var e = request.ExtrudeParameters!;
+                operationText = "拉伸草图";
+                dimensionsText = $"距离：{FormatMm(e.Distance)} 毫米\n方向：{(e.Direction == ExtrudeDirection.Reverse ? "沿草图法向反向" : "沿草图平面法向")}";
+                originText = $"草图引用：{e.SketchRef}";
+                break;
+            }
+            case ToolParametersKind.Revolve:
+            {
+                var r = request.RevolveParameters!;
+                string axisText = r.AxisMode switch
+                {
+                    RevolveAxisMode.SelectedAxis => "用户当前选中的直线/基准轴（执行时校验）",
+                    RevolveAxisMode.WcsX => "绝对坐标 X 轴",
+                    RevolveAxisMode.WcsY => "绝对坐标 Y 轴",
+                    _ => "绝对坐标 Z 轴",
+                };
+                operationText = "创建旋转体（Revolve）";
+                dimensionsText = $"角度：{FormatMm(r.AngleDeg)} 度\n轴：{axisText}（须在草图平面内）";
+                originText = $"草图引用：{r.SketchRef}";
+                break;
+            }
+            case ToolParametersKind.Boolean:
+            {
+                var b = request.BooleanParameters!;
+                string opText = b.Operation switch
+                {
+                    BooleanOperationType.Unite => "并集（unite）",
+                    BooleanOperationType.Subtract => "差集（subtract）：从目标体中减去工具体",
+                    _ => "交集（intersect）",
+                };
+                operationText = $"布尔运算：{opText}";
+                dimensionsText = $"目标体：{b.TargetBodyRef}\n工具体：{b.ToolBodyRef}";
+                originText = "运算后工具体被消耗（合并入布尔特征），结果归属目标体";
+                break;
+            }
         }
 
         var choice = MessageBox.Show(this,

@@ -25,7 +25,7 @@ namespace NXAI.Assistant.NxHost.NX2512;
 ///   - destroys the builder on all paths and appends non-sensitive failure
 ///     context to %TEMP%\NXAI_Assistant_operation_error.log.
 /// </summary>
-public sealed class NxToolExecutor : INxToolExecutor
+public sealed partial class NxToolExecutor : INxToolExecutor
 {
     private const string OperationLogFileName = "NXAI_Assistant_operation_error.log";
 

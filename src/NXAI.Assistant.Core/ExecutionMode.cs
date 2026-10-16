@@ -42,11 +42,11 @@ public static class ExecutionModeExtensions
 }
 
 /// <summary>
-/// The closed set of registered, non-destructive primitive-creation tools
-/// that autonomous mode may execute without a per-call confirmation. The
-/// list is explicit and hand-maintained: future destructive tools (delete,
-/// modify, suppress, rename, save, save-as, export, …) must never be added
-/// here without a separately approved permission decision.
+/// The closed set of registered, non-destructive modeling tools that
+/// autonomous mode may execute without a per-call confirmation. The list is
+/// explicit and hand-maintained: future destructive tools (delete, modify,
+/// suppress, rename, save, save-as, export, …) must never be added here
+/// without a separately approved permission decision.
 /// </summary>
 public static class AutonomousToolAllowlist
 {
@@ -56,6 +56,10 @@ public static class AutonomousToolAllowlist
         CreateCylinderTool.Name,
         CreateConeTool.Name,
         CreateSphereTool.Name,
+        CreateSketchTool.Name,
+        CreateExtrudeTool.Name,
+        CreateRevolveTool.Name,
+        BooleanOperationTool.Name,
     };
 
     private static readonly HashSet<string> ToolSet =

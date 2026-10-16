@@ -204,7 +204,8 @@ public sealed class NxContextReader
             Kind = "body",
             Subtype = sheet ? "sheet_body" : "solid_body",
             Name = SafeJournalId(body),
-            Body = new NxBodyInfo(sheet, faceCount, minX, minY, minZ, maxX, maxY, maxZ),
+            Body = new NxBodyInfo(sheet, faceCount, minX, minY, minZ, maxX, maxY, maxZ,
+                body.JournalIdentifier),
         };
     }
 

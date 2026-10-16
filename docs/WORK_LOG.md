@@ -223,3 +223,13 @@
 - **修复**（仅 `AssistantChatForm.cs` 模式条区域）：modeBar 改为内容驱动高度（Panel AutoSize + TLP RowStyle(AutoSize)，行高随开关 GetPreferredSize 的 DPI 缩放值自适应）；开关 Dock=Fill 垂直居中；删除死控件 `_modeBarStateLabel`（模式状态由开关自身文字标签表达）。未改动 ModeToggleSwitch 绘制、点击/键盘/无障碍/持久化、授权策略、允许清单、工具调用与 NX 执行链路。
 - **验证**【本轮执行】：Release 构建 0 警告 0 错误；测试 **274 项 = 273 通过 / 0 失败 / 1 跳过**（无回归）；`git diff --check` 通过；NX 未运行，仅 UI.dll 变更并部署，SHA-256 与构建产物一致（`191589a4…`，完整值见 Phase 6 报告 Phase 6.1 节）。备份：`D:\AI\NX_AI_ASSISTANT_backup_20261016_phase61_start`。
 - **遗留**：开关 OFF/ON 完整显示、无遮挡、DPI/缩放、点击键盘无障碍持久化共 5 项实机复验待执行（清单见 Phase 6 报告 Phase 6.1 节）；Phase 6 主清单与 Phase 5 剩余项仍待执行；工作区未提交（未授权）。
+
+## 2026-10-16 · Phase 7 草图/拉伸/旋转/布尔实现（离线验证通过；实机验收待执行）
+
+- **任务**：新增四个参数化建模工具——create_sketch（选中平面/基准面或 WCS XY/XZ/YZ + 矩形/圆轮廓）、create_extrude（草图法向拉伸）、create_revolve（显式轴旋转体，角度 (0,360]）、boolean_operation（unite/subtract/intersect，受控体引用）。复用 ToolRegistry/控制器/上下文/执行模式/确认卡/UndoMark/回滚/后置验证全链路；自主模式允许清单 4→8（同一封闭策略）。
+- **API 核验**（本机 NXOpen.dll 元数据反射 + NXOpen.xml 文档，临时探针不入库）：SketchInPlaceBuilder2/PlaneReference(Plane)/AddGeometry(InferNoConstraints)/GetAllGeometry/Feature、CurveCollection.CreateLine/CreateArc、Sections.CreateSection+CreateRuleCurveFeature+AddToSection、ExtrudeBuilder(Limits.Start/EndExtend.Value.SetFormula)、RevolveBuilder.Axis(AxisCollection.CreateAxis；**DatumAxis≠Axis**)、BooleanBuilder.Operation/Targets/Tools（过时 API 以 pragma 声明使用）、NXMatrix.Element、Expression.SetFormula。**AskMassProps3d 结果数组布局不可核实→未采用**，后置验证用解析几何包围盒替代（如实记录）。
+- **实现**：Core 四工具 Schema/解析器（GeometryToolJson 复用、未知字段/非有限/边界拒绝）、CreateBlockExecutionResult.DetailsJson（引用回流模型）、INxToolExecutor 4 新方法、NxBodyInfo.BodyRef（选中体引用）；NxHost `FeatureToolExecutor.cs`（partial NxToolExecutor，~1100 行）：平面解析/局部 u/v 坐标框架/草图几何/截面构建/轴解析与平面内校验/解析 AABB 验证（拉伸精确、旋转 360° 精确部分角度包络上界、布尔必要条件包含关系）；Controller 分派链 8 工具（修复了新分支被 sphere else 吞掉的 bug）；确认卡 4 新文案；自主路径状态行/执行前重查沿用 Phase 6。
+- **测试**：新增 FeatureToolContractTests（25 项）+ 控制器新工具分派/模式 5 项；更新注册表计数（4→8）、允许清单（4→8）、工具广告（8）、fake executor 补 4 方法。**314 项 = 313 通过 / 0 失败 / 1 跳过**（既有无回归）。
+- **验证**【本轮执行】：Release 构建 0 警告 0 错误；git diff --check 通过（修复一处 EOF 空行）；NX 未运行，4 DLL 部署 SHA-256 与构建产物一致。**离线通过 ≠ 实机通过：Phase 7 报告 §7 的 14 项实机验收全部待执行。**
+- **已知限制**（报告 §5）：轮廓仅矩形/圆；选中面草图平面非关联；拉伸仅定距离法向/反向；旋转轴须在草图平面内、部分角度验证为上界；布尔工具体默认消耗；体积级验证待 mass-props 索引核实后补充。
+- **遗留**：§7 实机验收全部待执行；GitHub 推送待重试（上轮连接失败）。

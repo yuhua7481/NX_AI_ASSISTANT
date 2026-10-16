@@ -25,6 +25,10 @@ public sealed class ToolConfirmationRequest
     public CreateCylinderParameters? CylinderParameters { get; private init; }
     public CreateConeParameters? ConeParameters { get; private init; }
     public CreateSphereParameters? SphereParameters { get; private init; }
+    public CreateSketchParameters? SketchParameters { get; private init; }
+    public CreateExtrudeParameters? ExtrudeParameters { get; private init; }
+    public CreateRevolveParameters? RevolveParameters { get; private init; }
+    public BooleanOperationParameters? BooleanParameters { get; private init; }
 
     public static ToolConfirmationRequest ForBlock(
         string toolCallId, string toolName, CreateBlockParameters parameters) => new()
@@ -62,6 +66,42 @@ public sealed class ToolConfirmationRequest
         SphereParameters = parameters,
     };
 
+    public static ToolConfirmationRequest ForSketch(
+        string toolCallId, string toolName, CreateSketchParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.Sketch,
+        SketchParameters = parameters,
+    };
+
+    public static ToolConfirmationRequest ForExtrude(
+        string toolCallId, string toolName, CreateExtrudeParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.Extrude,
+        ExtrudeParameters = parameters,
+    };
+
+    public static ToolConfirmationRequest ForRevolve(
+        string toolCallId, string toolName, CreateRevolveParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.Revolve,
+        RevolveParameters = parameters,
+    };
+
+    public static ToolConfirmationRequest ForBoolean(
+        string toolCallId, string toolName, BooleanOperationParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.Boolean,
+        BooleanParameters = parameters,
+    };
+
     /// <summary>Resolved by the window: the user's decision, or null when the
     /// flow was aborted (window closing, request cancelled) — never executes.</summary>
     public Task<ToolConfirmationDecision?> Response => _tcs.Task;
@@ -79,4 +119,8 @@ public enum ToolParametersKind
     Cylinder,
     Cone,
     Sphere,
+    Sketch,
+    Extrude,
+    Revolve,
+    Boolean,
 }

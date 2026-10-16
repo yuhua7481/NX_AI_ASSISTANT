@@ -88,7 +88,8 @@ public sealed record NxBodyInfo(
     bool IsSheetBody,
     int FaceCount,
     double? BoundMinX, double? BoundMinY, double? BoundMinZ,
-    double? BoundMaxX, double? BoundMaxY, double? BoundMaxZ);
+    double? BoundMaxX, double? BoundMaxY, double? BoundMaxZ,
+    string? BodyRef = null);
 
 /// <summary>
 /// Face summary. SurfaceType is the lowercased Face.FaceType name

@@ -109,6 +109,34 @@ public class ChatSessionControllerToolTests
             return Result;
         }
 
+        public CreateBlockExecutionResult ExecuteCreateSketch(
+            CreateSketchParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++; LastToolName = "create_sketch"; LastExpectedPath = expectedWorkPartFullPath;
+            return Result;
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateExtrude(
+            CreateExtrudeParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++; LastToolName = "create_extrude"; LastExpectedPath = expectedWorkPartFullPath;
+            return Result;
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateRevolve(
+            CreateRevolveParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++; LastToolName = "create_revolve"; LastExpectedPath = expectedWorkPartFullPath;
+            return Result;
+        }
+
+        public CreateBlockExecutionResult ExecuteBooleanOperation(
+            BooleanOperationParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++; LastToolName = "boolean_operation"; LastExpectedPath = expectedWorkPartFullPath;
+            return Result;
+        }
+
         public CreateConeParameters? LastConeParameters { get; private set; }
         public CreateSphereParameters? LastSphereParameters { get; private set; }
         public string? LastToolName { get; private set; }
@@ -463,7 +491,7 @@ public class ChatSessionControllerToolTests
 
         Assert.Equal(1, sender.RequestCount);
         Assert.Equal(0, executor.CallCount);
-        Assert.Equal(4, sender.ToolDeclarations[0]!.Count); // four tools advertised
+        Assert.Equal(8, sender.ToolDeclarations[0]!.Count); // eight tools advertised
         Assert.Equal(2, log.Messages.Count);
         Assert.Equal(ChatRole.Assistant, log.Messages[1].Role);
     }
@@ -720,9 +748,13 @@ public class ChatSessionControllerToolTests
         await WaitForCompletedAsync(controller);
 
         var tools = sender.ToolDeclarations[0]!;
-        Assert.Equal(4, tools.Count);
+        Assert.Equal(8, tools.Count);
         Assert.Equal(
-            new HashSet<string> { "create_block", "create_cylinder", "create_cone", "create_sphere" },
+            new HashSet<string>
+            {
+                "create_block", "create_cylinder", "create_cone", "create_sphere",
+                "create_sketch", "create_extrude", "create_revolve", "boolean_operation",
+            },
             tools.Select(t => t.Name).ToHashSet());
     }
 }

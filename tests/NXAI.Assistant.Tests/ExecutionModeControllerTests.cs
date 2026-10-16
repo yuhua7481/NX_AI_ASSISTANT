@@ -88,6 +88,34 @@ public class ExecutionModeControllerTests
             CallCount++; LastToolName = "create_sphere"; LastExpectedPath = expectedWorkPartFullPath;
             return Result;
         }
+
+        public CreateBlockExecutionResult ExecuteCreateSketch(
+            CreateSketchParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++; LastToolName = "create_sketch"; LastExpectedPath = expectedWorkPartFullPath;
+            return Result;
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateExtrude(
+            CreateExtrudeParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++; LastToolName = "create_extrude"; LastExpectedPath = expectedWorkPartFullPath;
+            return Result;
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateRevolve(
+            CreateRevolveParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++; LastToolName = "create_revolve"; LastExpectedPath = expectedWorkPartFullPath;
+            return Result;
+        }
+
+        public CreateBlockExecutionResult ExecuteBooleanOperation(
+            BooleanOperationParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++; LastToolName = "boolean_operation"; LastExpectedPath = expectedWorkPartFullPath;
+            return Result;
+        }
     }
 
     private sealed class ConfirmationGate
@@ -398,5 +426,100 @@ public class ExecutionModeControllerTests
 
         Assert.Equal(1, executor.CallCount);
         Assert.Equal(2, sender.RequestCount); // round 1 (tool call) + round 2 (final text)
+    }
+
+    // ------------------------------------------------------ Phase 7 dispatch
+
+    [Fact]
+    public async Task AutonomousMode_SketchTool_SkipsConfirmationAndDispatchesTypedParameters()
+    {
+        var (controller, sender, log, executor, gate, modeManager) = Create();
+        modeManager.SetMode(ExecutionMode.Autonomous);
+
+        sender.Enqueue(ScriptedSender.ToolCall(
+                name: "create_sketch",
+                args: """{"plane_mode":"wcs_xy","profile_type":"rectangle","width":80,"height":40,"unit":"mm"}"""),
+            () => ChatCompletionResult.OkText("完成。"));
+
+        controller.StartSend("画矩形草图");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Empty(gate.Requests);
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal("create_sketch", executor.LastToolName);
+        Assert.Contains(log.Messages, m => m.Role == ChatRole.Info && m.Text.Contains("自主模式：正在创建草图"));
+    }
+
+    [Fact]
+    public async Task ConfirmMode_ExtrudeTool_ShowsConfirmationAndPassesExpectedPath()
+    {
+        var (controller, sender, _, executor, gate, _) = Create();
+        sender.Enqueue(ScriptedSender.ToolCall(
+                name: "create_extrude",
+                args: """{"sketch_ref":"SKETCH_1","distance":25,"unit":"mm"}"""),
+            () => ChatCompletionResult.OkText("完成。"));
+
+        controller.StartSend("拉伸");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Single(gate.Requests);
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal("create_extrude", executor.LastToolName);
+        Assert.Equal("D:\\part.prt", executor.LastExpectedPath);
+    }
+
+    [Fact]
+    public async Task AutonomousMode_RevolveTool_InvalidAngle_ExecutesNothing()
+    {
+        var (controller, sender, log, executor, gate, modeManager) = Create();
+        modeManager.SetMode(ExecutionMode.Autonomous);
+
+        sender.Enqueue(ScriptedSender.ToolCall(
+                name: "create_revolve",
+                args: """{"sketch_ref":"S1","axis_mode":"wcs_x","angle":720}"""),
+            () => ChatCompletionResult.OkText("完成。"));
+
+        controller.StartSend("旋转");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Empty(gate.Requests);
+        Assert.Equal(0, executor.CallCount);
+        Assert.Contains(log.Messages, m => m.Text.Contains("参数校验未通过"));
+    }
+
+    [Fact]
+    public async Task AutonomousMode_BooleanTool_SameRefs_RejectedBeforeExecution()
+    {
+        var (controller, sender, log, executor, gate, modeManager) = Create();
+        modeManager.SetMode(ExecutionMode.Autonomous);
+
+        sender.Enqueue(ScriptedSender.ToolCall(
+                name: "boolean_operation",
+                args: """{"operation":"subtract","target_body_ref":"B1","tool_body_ref":"B1"}"""),
+            () => ChatCompletionResult.OkText("完成。"));
+
+        controller.StartSend("做布尔");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Empty(gate.Requests);
+        Assert.Equal(0, executor.CallCount);
+        Assert.Contains(log.Messages, m => m.Text.Contains("不能相同"));
+    }
+
+    [Fact]
+    public async Task ConfirmMode_BooleanTool_FullFlow_ExecutesOnce()
+    {
+        var (controller, sender, _, executor, gate, _) = Create();
+        sender.Enqueue(ScriptedSender.ToolCall(
+                name: "boolean_operation",
+                args: """{"operation":"unite","target_body_ref":"BODY_1","tool_body_ref":"BODY_2"}"""),
+            () => ChatCompletionResult.OkText("完成。"));
+
+        controller.StartSend("合并实体");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Single(gate.Requests);
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal("boolean_operation", executor.LastToolName);
     }
 }
