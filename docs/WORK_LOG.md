@@ -250,5 +250,5 @@
 - **根因**（三处叠加）：① StartNewConversation 先循环 Dispose 消息控件（每次释放改变滚动条→同步触发 ClientSizeChanged→遍历仍含已释放项的 _messageItems），Clear 在循环后才执行；② _messageItems 平行列表与控件树双轨维护，Dispose 不同步；③ 窗体拆除时子控件（RTB）先于 MessageItem 离开树，期间布局回调仍可触达。
 - **修复**（仅 AssistantChatForm.cs 消息生命周期/布局）：删除 _messageItems 平行列表→遍历 _messagesPanel.Controls.OfType<MessageItem>()（控件树=唯一事实来源）；ApplyViewportWidthToAllItems 加 _detached/IsDisposed/panel.IsDisposed 拆除门禁；MessageItem.ApplyViewportWidth 加自身+子视图存活检查（覆盖子控件先释放的拆除间隙）。MessageItem 改 internal（InternalsVisibleTo 已有）供测试。未动 Markdown 渲染/选择复制/滚动/建模/授权/持久化。
 - **测试**：新增 ChatMessageItemLifecycleTests 7 项（STA 线程跑 WinForms 控件：正常宽度/长 Markdown 重排/气泡与标签路径/Dispose 后更新不抛/子视图先释放后更新不抛/重复 Dispose）。**321 项 = 320 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
-- **部署**：**NX 正在运行（ugraf.exe），UI.dll 被锁定——按规则停止部署，未强制覆盖。** 构建产物 SHA-256 `f46eaa96eafddde3f9697b0045f8e4c59976bc7dee106ede594878849309babd` 已存档，待 NX 退出后部署核对。
+- **部署**【2026-10-16 完成】：用户确认 NX 关闭后部署 UI.dll，SHA-256 与构建产物核对一致（`f46eaa96…`）。（此前曾因 NX 运行锁定停止部署。）
 - **遗留**：面板级 ClientSizeChanged/滚动条交互无法离线覆盖→实机手动验收 6 步（Phase 7.1 报告 §4）；部署待 NX 退出。

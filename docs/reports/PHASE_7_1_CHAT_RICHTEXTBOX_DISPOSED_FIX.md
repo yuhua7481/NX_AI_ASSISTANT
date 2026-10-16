@@ -48,4 +48,4 @@
 
 ## 5. 部署状态
 
-**NX 正在运行（ugraf.exe），UI.dll 被锁定——按规则停止部署，未强制覆盖。** 构建产物就绪：`src/NXAI.Assistant.UI/bin/Release/net8.0-windows/NXAI.Assistant.UI.dll` SHA-256 `f46eaa96eafddde3f9697b0045f8e4c59976bc7dee106ede594878849309babd`。用户完全退出 NX 后重新部署（或下次 `build.ps1`）并核对该哈希。
+**已部署（2026-10-16，用户确认 NX 关闭后）**：UI.dll 复制至 `deploy/nxai_custom/application/`，部署后 SHA-256 与构建产物核对一致：`f46eaa96eafddde3f9697b0045f8e4c59976bc7dee106ede594878849309babd`。（此前曾因 NX 运行锁定而按规则停止部署，未强制覆盖。）
