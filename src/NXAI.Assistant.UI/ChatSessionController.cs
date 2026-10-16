@@ -61,6 +61,13 @@ public sealed class ChatSessionController : IDisposable
     private readonly INxToolExecutor? _toolExecutor;
     private readonly ToolConfirmationDelegate _confirmationHandler;
     private readonly ToolRegistry _toolRegistry;
+    private readonly Func<NxContextSnapshot?>? _contextProvider;
+    private readonly ExecutionModeManager? _modeManager;
+    private readonly ExecutionModePolicy _modePolicy = new();
+
+    /// <summary>Snapshot captured when the current turn started (null when no
+    /// provider is wired or capture failed). Consumed by face-relative tools.</summary>
+    public NxContextSnapshot? CurrentTurnContext { get; private set; }
 
     private CancellationTokenSource? _cts;
     private bool _inFlight;
@@ -79,7 +86,9 @@ public sealed class ChatSessionController : IDisposable
         ChatRequestDelegate? requestSender = null,
         int maxOutboundMessages = DefaultMaxOutboundMessages,
         INxToolExecutor? toolExecutor = null,
-        ToolConfirmationDelegate? confirmationHandler = null)
+        ToolConfirmationDelegate? confirmationHandler = null,
+        Func<NxContextSnapshot?>? contextProvider = null,
+        ExecutionModeManager? modeManager = null)
     {
         _modelService = modelService ?? throw new ArgumentNullException(nameof(modelService));
         _chatLog = chatLog ?? throw new ArgumentNullException(nameof(chatLog));
@@ -92,8 +101,10 @@ public sealed class ChatSessionController : IDisposable
         {
             throw new ArgumentException("启用工具执行器时必须提供确认回调。", nameof(confirmationHandler));
         }
+        _contextProvider = contextProvider;
         _confirmationHandler = confirmationHandler ?? ((_, _) =>
             Task.FromResult<ToolConfirmationDecision?>(null));
+        _modeManager = modeManager;
         _toolRegistry = toolExecutor != null
             ? CreateBlockTool.CreateRegistry()
             : new ToolRegistry();
@@ -109,6 +120,13 @@ public sealed class ChatSessionController : IDisposable
 
     /// <summary>True when a modeling executor is registered and tools are advertised to the model.</summary>
     public bool ToolsEnabled => _toolExecutor != null;
+
+    /// <summary>
+    /// The execution mode actually in effect at the backend dispatch stage
+    /// (Confirm when no manager was wired — the pre-Phase-6 behavior).
+    /// </summary>
+    public ExecutionMode CurrentExecutionMode =>
+        _modeManager?.CurrentMode ?? ExecutionMode.Confirm;
 
     /// <summary>
     /// Loads the configuration through the injected loader and applies it to the model
@@ -142,6 +160,18 @@ public sealed class ChatSessionController : IDisposable
         if (_detached || _inFlight || string.IsNullOrWhiteSpace(userText))
             return false;
 
+        // Capture the NX context snapshot before the request starts. The
+        // provider must run on the NX UI thread — StartSend is only called
+        // there (chat form input path), so a synchronous read is safe and
+        // keeps the snapshot consistent with what the user sees.
+        CurrentTurnContext = _contextProvider?.Invoke();
+        if (CurrentTurnContext is { } captured)
+        {
+            // Make visible what was actually captured this turn — a missing
+            // or empty selection must never fail silently.
+            _chatLog.Add(ChatRole.Info, DescribeCapturedContext(captured));
+        }
+
         _inFlight = true;
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -152,6 +182,19 @@ public sealed class ChatSessionController : IDisposable
         _ = RunRequestAsync(cts.Token).ContinueWith(
             static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
         return true;
+    }
+
+    /// <summary>
+    /// Runs the context provider once now (NX UI thread) and returns the
+    /// snapshot; also refreshes CurrentTurnContext so the next send uses it.
+    /// Null when no provider is configured or the provider reports nothing.
+    /// </summary>
+    public NxContextSnapshot? CaptureContextNow()
+    {
+        var snapshot = _contextProvider?.Invoke();
+        if (snapshot != null)
+            CurrentTurnContext = snapshot;
+        return snapshot;
     }
 
     /// <summary>Asks the in-flight request to abort; safe to call any time.</summary>
@@ -202,6 +245,18 @@ public sealed class ChatSessionController : IDisposable
     private async Task RunRequestAsync(CancellationToken cancellationToken)
     {
         var protocol = new List<OutboundMessage>(BuildOutboundMessages());
+        // Inject this turn's NX state as a clearly-labeled system message so
+        // the model knows the current selection/part context (state data, not
+        // user instructions). Kept only for this turn.
+        var turnContext = CurrentTurnContext;
+        if (turnContext != null)
+        {
+            var summary = turnContext.ToContextSummary();
+            if (summary.Length > 0)
+            {
+                protocol.Add(new OutboundMessage(OutboundMessage.RoleSystem, summary));
+            }
+        }
         string? finalText = null;
         string? errorText = null;
         var canceled = false;
@@ -311,6 +366,7 @@ public sealed class ChatSessionController : IDisposable
         }
 
         ToolConfirmationRequest request;
+        string requestDescription;
         if (call.FunctionName == CreateBlockTool.Name)
         {
             var blockParameters = new CreateBlockRequestParser()
@@ -322,13 +378,12 @@ public sealed class ChatSessionController : IDisposable
                     $"参数校验未通过，未创建任何几何。{parseError}");
             }
 
-            _chatLog.Add(ChatRole.Info,
-                $"模型请求创建长方体：长 {FormatNumber(blockParameters.Length)} × " +
+            requestDescription =
+                $"长方体：长 {FormatNumber(blockParameters.Length)} × " +
                 $"宽 {FormatNumber(blockParameters.Width)} × 高 {FormatNumber(blockParameters.Height)} 毫米" +
                 (blockParameters.OriginX == 0 && blockParameters.OriginY == 0 && blockParameters.OriginZ == 0
                     ? "，原点 (0, 0, 0)。"
-                    : $"，原点 ({FormatNumber(blockParameters.OriginX)}, {FormatNumber(blockParameters.OriginY)}, {FormatNumber(blockParameters.OriginZ)})。") +
-                "等待你的确认。");
+                    : $"，原点 ({FormatNumber(blockParameters.OriginX)}, {FormatNumber(blockParameters.OriginY)}, {FormatNumber(blockParameters.OriginZ)})。");
             request = ToolConfirmationRequest.ForBlock(call.Id, call.FunctionName, blockParameters);
         }
         else if (call.FunctionName == CreateCylinderTool.Name)
@@ -342,13 +397,12 @@ public sealed class ChatSessionController : IDisposable
                     $"参数校验未通过，未创建任何几何。{parseError}");
             }
 
-            _chatLog.Add(ChatRole.Info,
-                $"模型请求创建圆柱体：直径 {FormatNumber(cylinderParameters.Diameter)} × " +
+            requestDescription =
+                $"圆柱体：直径 {FormatNumber(cylinderParameters.Diameter)} × " +
                 $"高 {FormatNumber(cylinderParameters.Height)} 毫米，轴向 +Z" +
                 (cylinderParameters.OriginX == 0 && cylinderParameters.OriginY == 0 && cylinderParameters.OriginZ == 0
                     ? "，底面圆心 (0, 0, 0)。"
-                    : $"，底面圆心 ({FormatNumber(cylinderParameters.OriginX)}, {FormatNumber(cylinderParameters.OriginY)}, {FormatNumber(cylinderParameters.OriginZ)})。") +
-                "等待你的确认。");
+                    : $"，底面圆心 ({FormatNumber(cylinderParameters.OriginX)}, {FormatNumber(cylinderParameters.OriginY)}, {FormatNumber(cylinderParameters.OriginZ)})。");
             request = ToolConfirmationRequest.ForCylinder(call.Id, call.FunctionName, cylinderParameters);
         }
         else if (call.FunctionName == CreateConeTool.Name)
@@ -365,12 +419,11 @@ public sealed class ChatSessionController : IDisposable
             string coneShape = coneParameters.TopDiameter > 0
                 ? $"圆台：底面直径 {FormatNumber(coneParameters.BaseDiameter)} × 顶部直径 {FormatNumber(coneParameters.TopDiameter)} × 高 {FormatNumber(coneParameters.Height)} 毫米"
                 : $"圆锥体：底面直径 {FormatNumber(coneParameters.BaseDiameter)} × 高 {FormatNumber(coneParameters.Height)} 毫米（锥顶收敛）";
-            _chatLog.Add(ChatRole.Info,
-                $"模型请求创建{coneShape}，轴向 +Z" +
+            requestDescription =
+                $"{coneShape}，轴向 +Z" +
                 (coneParameters.OriginX == 0 && coneParameters.OriginY == 0 && coneParameters.OriginZ == 0
                     ? "，底面圆心 (0, 0, 0)。"
-                    : $"，底面圆心 ({FormatNumber(coneParameters.OriginX)}, {FormatNumber(coneParameters.OriginY)}, {FormatNumber(coneParameters.OriginZ)})。") +
-                "等待你的确认。");
+                    : $"，底面圆心 ({FormatNumber(coneParameters.OriginX)}, {FormatNumber(coneParameters.OriginY)}, {FormatNumber(coneParameters.OriginZ)})。");
             request = ToolConfirmationRequest.ForCone(call.Id, call.FunctionName, coneParameters);
         }
         else
@@ -384,13 +437,43 @@ public sealed class ChatSessionController : IDisposable
                     $"参数校验未通过，未创建任何几何。{parseError}");
             }
 
-            _chatLog.Add(ChatRole.Info,
-                $"模型请求创建球体：直径 {FormatNumber(sphereParameters.Diameter)} 毫米" +
+            requestDescription =
+                $"球体：直径 {FormatNumber(sphereParameters.Diameter)} 毫米" +
                 (sphereParameters.CenterX == 0 && sphereParameters.CenterY == 0 && sphereParameters.CenterZ == 0
                     ? "，球心 (0, 0, 0)。"
-                    : $"，球心 ({FormatNumber(sphereParameters.CenterX)}, {sphereParameters.CenterY:F3}, {sphereParameters.CenterZ:F3})。") +
-                "等待你的确认。");
+                    : $"，球心 ({FormatNumber(sphereParameters.CenterX)}, {sphereParameters.CenterY:F3}, {sphereParameters.CenterZ:F3})。");
             request = ToolConfirmationRequest.ForSphere(call.Id, call.FunctionName, sphereParameters);
+        }
+
+        // Authorization decision at the backend dispatch stage — read the
+        // effective mode here, never from the UI. Confirm mode (and any
+        // tool not on the autonomous allowlist) always takes the existing
+        // confirmation path.
+        var effectiveMode = _modeManager?.CurrentMode ?? ExecutionMode.Confirm;
+        if (!_modePolicy.RequiresConfirmation(effectiveMode, call.FunctionName))
+        {
+            _chatLog.Add(ChatRole.Info, $"自主模式：正在创建{requestDescription}");
+            // Re-check just before mutating the model: a mode switch between
+            // the decision and this point must fall back to the confirmation
+            // flow — never straight into execution.
+            var recheckMode = _modeManager!.CurrentMode;
+            if (recheckMode != ExecutionMode.Autonomous)
+            {
+                _chatLog.Add(ChatRole.Info,
+                    "执行前检测到模式已切换回确认模式，本次操作需确认后才会执行。");
+            }
+            else if (_detached || cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+            else
+            {
+                return ExecuteConfirmedTool(request, expectedWorkPartFullPath: null);
+            }
+        }
+        else
+        {
+            _chatLog.Add(ChatRole.Info, $"模型请求创建{requestDescription}等待你的确认。");
         }
 
         var decision = await _confirmationHandler(request, cancellationToken);
@@ -413,21 +496,91 @@ public sealed class ChatSessionController : IDisposable
             throw new OperationCanceledException(cancellationToken);
         }
 
-        return request.ParametersKind switch
+        return ExecuteConfirmedTool(request, decision.ExpectedWorkPartFullPath);
+    }
+
+    private CreateBlockExecutionResult ExecuteConfirmedTool(
+        ToolConfirmationRequest request, string? expectedWorkPartFullPath) =>
+        request.ParametersKind switch
         {
             ToolParametersKind.Block => _toolExecutor!.ExecuteCreateBlock(
-                request.BlockParameters!, decision.ExpectedWorkPartFullPath),
+                request.BlockParameters!, expectedWorkPartFullPath),
             ToolParametersKind.Cylinder => _toolExecutor!.ExecuteCreateCylinder(
-                request.CylinderParameters!, decision.ExpectedWorkPartFullPath),
+                request.CylinderParameters!, expectedWorkPartFullPath),
             ToolParametersKind.Cone => _toolExecutor!.ExecuteCreateCone(
-                request.ConeParameters!, decision.ExpectedWorkPartFullPath),
+                request.ConeParameters!, expectedWorkPartFullPath),
             _ => _toolExecutor!.ExecuteCreateSphere(
-                request.SphereParameters!, decision.ExpectedWorkPartFullPath),
+                request.SphereParameters!, expectedWorkPartFullPath),
         };
-    }
 
     private static string FormatNumber(double value) =>
         value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// One-line, user-facing summary of what the current turn's context
+    /// capture actually observed (selection count and types; for a single
+    /// planar face also its center and normal). Failures are stated as
+    /// failures — never silently omitted.
+    /// </summary>
+    internal static string DescribeCapturedContext(NxContextSnapshot snapshot)
+    {
+        switch (snapshot.Status)
+        {
+            case "no_active_part":
+                return "NX 上下文：当前没有活动工作部件。";
+            case "error":
+            {
+                var reason = snapshot.Unavailable.Count > 0
+                    ? snapshot.Unavailable[0]
+                    : $"状态 {snapshot.Status}";
+                return $"NX 上下文读取失败：{reason}";
+            }
+        }
+
+        var kindText = DescribeSelectionKinds(snapshot.Selection);
+        var head = snapshot.Selection.Count == 0
+            ? "NX 上下文：当前没有选中对象。"
+            : $"NX 上下文：已选择 {snapshot.Selection.Count} 个对象{kindText}。";
+
+        // When exactly one face with a full geometry summary was captured,
+        // surface its center/normal so the user can sanity-check the data the
+        // model will see (e.g. before a face-relative cylinder request).
+        var facesWithGeometry = snapshot.Selection
+            .Where(s => s.Kind == "face" && s.Face is { } f &&
+                f.CenterX is not null && f.CenterY is not null && f.CenterZ is not null &&
+                f.NormalX is not null && f.NormalY is not null && f.NormalZ is not null)
+            .ToList();
+        if (facesWithGeometry.Count == 1 && facesWithGeometry[0].Face is { } face)
+        {
+            head += $"\n面中心 ({Fmt(face.CenterX)}, {Fmt(face.CenterY)}, {Fmt(face.CenterZ)})，" +
+                    $"法向 ({Fmt(face.NormalX)}, {Fmt(face.NormalY)}, {Fmt(face.NormalZ)})";
+        }
+
+        if (snapshot.Unavailable.Count > 0)
+            head += $"\n未获取：{string.Join("；", snapshot.Unavailable.Take(2))}";
+        return head;
+    }
+
+    private static string Fmt(double? v) => v is { } d
+        ? d.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)
+        : "未知";
+
+    private static string DescribeSelectionKinds(IReadOnlyList<NxSelectionItem> selection)
+    {
+        if (selection.Count == 0)
+            return "";
+        var groups = selection
+            .GroupBy(s => s.Kind switch
+            {
+                "face" => s.Subtype != null ? $"面（{s.Subtype}）" : "面",
+                "body" => s.Body is { IsSheetBody: true } ? "片体" : "实体",
+                "curve" => s.Subtype ?? "曲线",
+                _ => s.Kind,
+            })
+            .Select(g => g.Count() == 1 ? $"1 个{g.Key}" : $"{g.Count()} 个{g.Key}");
+        return "（" + string.Join("、", groups) + "）";
+
+    }
 
     /// <summary>
     /// Serializes the execution outcome for the model. Contains no secrets and

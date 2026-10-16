@@ -34,6 +34,8 @@ public sealed class AssistantChatForm : Form
     private readonly ChatLog _chatLog = new();
     private readonly ChatSessionController _controller;
     private readonly INxToolExecutor? _toolExecutor;
+    private readonly ExecutionModeManager _modeManager;
+    private readonly ModeToggleSwitch _modeSwitch;
     private ToolConfirmationRequest? _pendingConfirmation;
     private volatile bool _detached;
     private readonly ToolTip _toolTip = new();
@@ -51,19 +53,27 @@ public sealed class AssistantChatForm : Form
     private readonly Panel _messagesPanel;
     private readonly TextBox _inputBox;
     private readonly Button _sendButton;
+    private readonly Button _refreshContextButton;
     private readonly Button _cancelButton;
     private readonly Label _inputHintLabel;
+    private readonly Label _modeBarLabel;
+    private readonly Func<NxContextSnapshot?>? _contextProvider;
 
-    public AssistantChatForm(IActivePartReader partReader, INxToolExecutor? toolExecutor = null)
+    public AssistantChatForm(IActivePartReader partReader, INxToolExecutor? toolExecutor = null,
+        Func<NxContextSnapshot?>? contextProvider = null)
     {
         _partReader = partReader ?? throw new ArgumentNullException(nameof(partReader));
         _toolExecutor = toolExecutor;
+        _contextProvider = contextProvider;
+        _modeManager = new ExecutionModeManager(new JsonFileExecutionModeStore());
 
         ChatSessionController BuildController() => new(
             new ModelService(), _chatLog, () => ModelService.LoadConfiguration(),
             requestSender: null,
             toolExecutor: toolExecutor,
-            confirmationHandler: toolExecutor != null ? ShowToolConfirmationAsync : null);
+            confirmationHandler: toolExecutor != null ? ShowToolConfirmationAsync : null,
+            contextProvider: contextProvider,
+            modeManager: _modeManager);
 
         _controller = BuildController();
         _controller.RequestStarted += (_, _) => SetRequestUiState(inFlight: true);
@@ -283,6 +293,16 @@ public sealed class AssistantChatForm : Form
         StyleSecondaryButton(_cancelButton);
         _cancelButton.Click += (_, _) => _controller.CancelActiveRequest();
 
+        _refreshContextButton = new Button
+        {
+            Text = "刷新上下文",
+            AutoSize = false,
+            Size = new Size(96, 32),
+            TabIndex = 3,
+        };
+        StyleSecondaryButton(_refreshContextButton);
+        _refreshContextButton.Click += (_, _) => RefreshContextDisplay();
+
         _inputHintLabel = new Label
         {
             Text = "Enter 发送 · Shift+Enter 换行",
@@ -294,6 +314,7 @@ public sealed class AssistantChatForm : Form
         };
         var inputBar = new Panel { Dock = DockStyle.Fill };
         inputBar.Controls.Add(_inputHintLabel);
+        inputBar.Controls.Add(_refreshContextButton);
         inputBar.Controls.Add(_cancelButton);
         inputBar.Controls.Add(_sendButton);
         inputBar.Layout += (_, _) => PositionInputButtons(inputBar);
@@ -308,9 +329,55 @@ public sealed class AssistantChatForm : Form
         inputRoot.Controls.Add(inputBar);
         inputRoot.Controls.Add(inputCard);
 
+        // --- execution mode bar: sits directly above the input box -------------
+        // The bar's height must be driven by the switch's own preferred size
+        // (it scales with DPI), never a fixed pixel height — a fixed height
+        // clips the track/knob at 125%/150% DPI scaling.
+        _modeSwitch = new ModeToggleSwitch
+        {
+            Checked = _modeManager.CurrentMode == ExecutionMode.Autonomous,
+            Margin = new Padding(0, 2, 0, 2),
+            Dock = DockStyle.Fill,
+            TabStop = true,
+        };
+        _modeSwitch.ToggleRequested += (_, _) => HandleModeToggleRequested();
+        _modeBarLabel = new Label
+        {
+            Text = "执行模式",
+            AutoSize = true,
+            Margin = new Padding(0, 6, 0, 0),
+            Font = SmallFont,
+            ForeColor = ChatPalette.HeaderText,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        var modeBarTable = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+        };
+        modeBarTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        modeBarTable.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        modeBarTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        modeBarTable.Controls.Add(_modeBarLabel, 0, 0);
+        modeBarTable.Controls.Add(_modeSwitch, 1, 0);
+        var modeBar = new Panel
+        {
+            Dock = DockStyle.Top,
+            BackColor = ChatPalette.MainBg,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(24, 2, 24, 2),
+        };
+        modeBar.Controls.Add(modeBarTable);
+
         // --- assemble ------------------------------------------------------------
         var mainArea = new Panel { Dock = DockStyle.Fill, BackColor = ChatPalette.MainBg };
         mainArea.Controls.Add(_messagesPanel);
+        mainArea.Controls.Add(modeBar);
         mainArea.Controls.Add(header);
         mainArea.Controls.Add(inputRoot);
 
@@ -384,7 +451,107 @@ public sealed class AssistantChatForm : Form
             _chatLog.Add(ChatRole.Info, "模型配置已保存，但内容不完整，请重新检查。");
     }
 
+    // ------------------------------------------------------------ context feedback
+
+    /// <summary>
+    /// Re-reads the NX context on demand (NX UI thread — button click) and
+    /// shows in the chat what was captured. Read failures are reported as
+    /// failures with the reason; success is never fabricated.
+    /// </summary>
+    private void RefreshContextDisplay()
+    {
+        try
+        {
+            var snapshot = _controller.CaptureContextNow();
+            if (snapshot != null)
+                _chatLog.Add(ChatRole.Info, ChatSessionController.DescribeCapturedContext(snapshot));
+            else
+                _chatLog.Add(ChatRole.Info, "NX 上下文：暂不可用（未捕获到上下文）。");
+        }
+        catch (Exception ex)
+        {
+            _chatLog.Add(ChatRole.Error, $"NX 上下文读取失败：{ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------ execution mode
+
+    /// <summary>
+    /// Handles a toggle ask from the switch. The switch state is never
+    /// flipped directly: the mode manager validates + persists first, and
+    /// only a successful application updates the switch to the mode that is
+    /// really in effect. A failing persistence keeps the previous mode and
+    /// the switch snaps back with an error message. Toggling never confirms
+    /// any pending modeling request and never triggers a tool.
+    /// </summary>
+    private void HandleModeToggleRequested()
+    {
+        if (_controller.IsRequestInFlight)
+        {
+            MessageBox.Show(this,
+                "当前有请求正在进行，切换模式可能在执行中途改变授权策略。\n" +
+                "请等待请求完成或取消后再切换。",
+                "NX AI Assistant", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var target = _modeManager.CurrentMode == ExecutionMode.Autonomous
+            ? ExecutionMode.Confirm
+            : ExecutionMode.Autonomous;
+        try
+        {
+            _modeManager.SetMode(target);
+        }
+        catch (Exception ex)
+        {
+            // Persistence failed: the in-memory mode is unchanged — restore
+            // the switch to the mode that is actually in effect.
+            SyncModeSwitchToEffectiveMode();
+            _chatLog.Add(ChatRole.Error,
+                $"模式切换失败（未生效）：{ex.Message}。当前仍为{_modeManager.CurrentMode.DisplayName()}。");
+            return;
+        }
+
+        SyncModeSwitchToEffectiveMode();
+        _chatLog.Add(ChatRole.Info,
+            target == ExecutionMode.Autonomous
+                ? "已切换到自主模式：允许清单中的建模工具（长方体/圆柱/圆锥/圆台/球体）在参数与上下文校验通过后将直接执行，不再逐次确认。歧义或非法请求仍会安全拒绝。"
+                : "已切换到确认模式：所有建模操作执行前都会显示确认卡。");
+    }
+
+    /// <summary>Makes the switch show the backend's effective mode — the
+    /// single source of truth is the manager (the switch's own label names
+    /// the mode, so no separate state label is needed).</summary>
+    private void SyncModeSwitchToEffectiveMode()
+    {
+        var effective = _modeManager.CurrentMode;
+        _modeSwitch.SetChecked(effective == ExecutionMode.Autonomous);
+    }
+
     // ------------------------------------------------------------ tool confirmation
+
+    /// <summary>
+    /// Describes the planar face selected in this turn's context snapshot (for
+    /// the face-relative confirmation card). Null when no single planar face
+    /// with a computed center/normal is present.
+    /// </summary>
+    private string? DescribeSelectedPlanarFace()
+    {
+        var snapshot = _controller.CurrentTurnContext;
+        if (snapshot == null)
+            return null;
+        var faces = snapshot.Selection
+            .Where(s => s.Kind == "face" && s.Face != null)
+            .ToList();
+        if (faces.Count != 1)
+            return null;
+        var face = faces[0].Face!;
+        if (face.CenterX is not { } cx || face.CenterY is not { } cy || face.CenterZ is not { } cz ||
+            face.NormalX is not { } nx || face.NormalY is not { } ny || face.NormalZ is not { } nz)
+            return null;
+        return $"目标面：平面\n面中心：({FormatMm(cx)}, {FormatMm(cy)}, {FormatMm(cz)})\n" +
+               $"面法向（圆柱轴向）：({nx:0.###}, {ny:0.###}, {nz:0.###})";
+    }
 
     /// <summary>
     /// Presents a pending modeling action for explicit user confirmation.
@@ -438,11 +605,20 @@ public sealed class AssistantChatForm : Form
             case ToolParametersKind.Cylinder:
             {
                 var c = request.CylinderParameters!;
-                operationText = "创建圆柱体（轴向 +Z）";
-                dimensionsText = $"直径：{FormatMm(c.Diameter)} 毫米\n高：{FormatMm(c.Height)} 毫米";
-                originText = c.OriginX == 0 && c.OriginY == 0 && c.OriginZ == 0
-                    ? "(0, 0, 0)"
-                    : $"({FormatMm(c.OriginX)}, {FormatMm(c.OriginY)}, {FormatMm(c.OriginZ)})（底面圆心）";
+                if (c.Placement == CylinderPlacement.SelectedFaceCenter)
+                {
+                    operationText = "创建圆柱体（放置方式：选中面居中，轴沿面外法向）";
+                    dimensionsText = $"直径：{FormatMm(c.Diameter)} 毫米\n高：{FormatMm(c.Height)} 毫米";
+                    originText = DescribeSelectedPlanarFace() ?? "（当前选中面信息不可用，将无法执行）";
+                }
+                else
+                {
+                    operationText = "创建圆柱体（轴向 +Z）";
+                    dimensionsText = $"直径：{FormatMm(c.Diameter)} 毫米\n高：{FormatMm(c.Height)} 毫米";
+                    originText = c.OriginX == 0 && c.OriginY == 0 && c.OriginZ == 0
+                        ? "(0, 0, 0)"
+                        : $"({FormatMm(c.OriginX)}, {FormatMm(c.OriginY)}, {FormatMm(c.OriginZ)})（底面圆心）";
+                }
                 break;
             }
             case ToolParametersKind.Cone:
@@ -713,11 +889,13 @@ public sealed class AssistantChatForm : Form
 
     private void PositionInputButtons(Panel inputBar)
     {
-        // 取消在发送左侧：两个按钮作为一个整体右对齐、垂直居中。
+        // 取消在发送左侧、刷新上下文在取消左侧：三个按钮作为一个整体右对齐、垂直居中。
         _cancelButton.Left = inputBar.ClientSize.Width - _cancelButton.Width - 4;
         _cancelButton.Top = Math.Max(0, (inputBar.ClientSize.Height - _cancelButton.Height) / 2);
         _sendButton.Left = _cancelButton.Left - _sendButton.Width - 8;
         _sendButton.Top = Math.Max(0, (inputBar.ClientSize.Height - _sendButton.Height) / 2);
+        _refreshContextButton.Left = _sendButton.Left - _refreshContextButton.Width - 8;
+        _refreshContextButton.Top = Math.Max(0, (inputBar.ClientSize.Height - _refreshContextButton.Height) / 2);
     }
 
     private static void StylePrimaryButton(Button button)
