@@ -110,3 +110,11 @@
 4. **推送目标**：`origin/recovery/pre-review-20261014-234252`（普通 push，fast-forward 自 `9cfd87a`）。与 `origin/main`（`14c27d4`）的关系：恢复分支不含 main 新提交，main 亦不含本分支成果；**不合并 main、不强制推送、不改写历史**。
 
 > **远端状态更正（2026-10-16 收尾轮内）**：多次重试 `git ls-remote` 均无法连接 GitHub（连接重置/超时），远端实际状态无法本轮确认。以本地 refs 为准：`origin/recovery/pre-review-20261014-234252` 最后已知 `9cfd87a`、`origin/main` = `14c27d4`、本地 HEAD = `9cfd87a`（Phase 2 未提交、未推送）。文档中远端表述均按"最后已知 + 待网络恢复确认"记录。本轮 git diff --check 通过，备份目录存在，未执行任何 commit/push/reset/clean。
+
+## 2026-10-16 · Phase 2 检查点：已提交并推送（用户授权执行）
+
+- **提交**：`6b030bb` `feat: Phase 2 typed tool calling + create_block with confirmation and postcondition verification`——25 文件，+2621/−118；排除 `tests/TestResults/`（保持未跟踪）。
+- **推送**：`git push origin recovery/pre-review-20261014-234252` 成功（`9cfd87a..6b030bb`，普通 fast-forward，无强制）；第三次重试成功（前两次 GitHub 连接失败）。`git ls-remote` 复核远端 refs = `6b030bb`，与本地一致。
+- **提交前检查**：逐文件暂存（未用 `git add .`）；暂存 diff 密钥扫描 0 命中；无暂存临时文件。
+- **工作区现状**：干净（仅剩未跟踪 `tests/TestResults/` 调试产物）；HEAD = 远端 = `6b030bb`。
+- **与 main 关系**：`origin/main` 仍 `14c27d4`，未合并、未推送 main——保持恢复分支独立，合并决策归用户。
