@@ -407,3 +407,11 @@
 - **测试**：全量 **376 项 = 375 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `8dcd0b4d…`、UI `d7e5c600…`、NxHost `49eec4ba…`、Entry `d52187d3…`；NX 未运行）。
 - **遗留**：实机复验——点"几何自检"预期四场景全 ✓（caseB 的 XZ 草图应实际落在 XZ 平面上，旋转校验通过，产生圆环）；XZ U45 世界坐标映射核对（center_u=45 应映射到世界 X=45）。
+
+## 2026-10-17 · Phase 8.4 caseB 根因修复：临时 CSYS 导致 Commit 拒绝（离线验证通过；部署待 NX 退出）
+
+- **决定性证据**（PhaseLog + operation_error.log）：8.3 的 NewCsys+Csystem 路径下，XZ 草图在 `Builder.Commit()` 抛 **"输入参数为空或无效"**——不再是 7.4 的"圆弧平面不平行"（该问题已被 8.2/8.3 的 frame 修复解决）。根因：`CreateCoordinateSystem(origin, Matrix3x3, isTemporary: true)` 创建的**临时 CSYS 不可被 SketchInPlaceBuilder 附着**（临时 CSYS 不显示、不保存、无 Tag 供特征引用）。
+- **修复**（仅 FeatureToolExecutor.cs ExecuteCreateSketch）：`isTemporary` 从 `true` 改为 `false`——非临时 CSYS 成为真实基准对象供草图附着；在 UndoMark 内创建，失败草图回滚时一并回滚。
+- **测试**：全量 **376 项 = 375 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：**NX 正在运行（ugraf.exe），DLL 被锁定——按规则停止部署。** 构建产物 SHA：NxHost `afb1698d…`、Core `7bf7eeaa…`；用户退出 NX 后部署并核对。
+- **遗留**：实机复验 caseB（预期：XZ 草图成功提交在 XZ 平面上→旋转校验通过→圆环产生）。

@@ -92,14 +92,20 @@ public sealed partial class NxToolExecutor
             }
             explicitCsys = parameters.PlaneMode switch
             {
+                // isTemporary must be FALSE: a temporary CSYS is not displayed,
+                // not saved, and SketchInPlaceBuilder.Commit rejects it with
+                // "输入参数为空或无效" (live failure, Phase 8.4). A non-temporary
+                // CSYS becomes a real datum object that the sketch can attach
+                // to; it is created inside the UndoMark so a failed sketch
+                // rolls it back with everything else.
                 SketchPlaneMode.WcsXZ => workPart.CoordinateSystems.CreateCoordinateSystem(
                     new Point3d(0, 0, 0),
                     new Matrix3x3 { Xx = 1, Xy = 0, Xz = 0, Yx = 0, Yy = 0, Yz = 1, Zx = 0, Zy = -1, Zz = 0 },
-                    true),
+                    false),
                 SketchPlaneMode.WcsYZ => workPart.CoordinateSystems.CreateCoordinateSystem(
                     new Point3d(0, 0, 0),
                     new Matrix3x3 { Xx = 0, Xy = 0, Xz = 1, Yx = 0, Yy = 1, Yz = 0, Zx = -1, Zy = 0, Zz = 0 },
-                    true),
+                    false),
                 _ => null,
             };
             PhaseLog.Write("execute.sketch",
