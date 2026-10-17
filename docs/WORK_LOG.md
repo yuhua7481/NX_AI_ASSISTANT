@@ -399,3 +399,11 @@
 - **验收运行结果**：Offline 模式 8/8 全部 Passed（重部署后）；deploy.hashmatch 在重建后正确检测过期部署（预期行为——重建后需重部署）。
 - **部署**：4 DLL SHA-256 一致（Core `f9aa4e3c…`、UI `9b9b7959…`、NxHost `6916327c…`、Entry `d52187d3…`；NX 未运行）。
 - **遗留**：a81bd72（综合验收报告）+ 本轮提交待推送（GitHub 间歇不可达）；实机五项清单不变。
+
+## 2026-10-17 · Phase 8.3 XZ/YZ 草图用显式 Csystem 修复（离线验证通过；已部署；实机复验待执行）
+
+- **决定性证据**（PhaseLog frame 实测）：XZ 平面请求的草图 NX 实际分配了 XY 坐标系（u=(1,0,0) v=(0,1,0) n=(0,0,1)）——NX 的 `PlaneOption.ExistingPlane + Plane(normal=(0,-1,0))` 被重定向到 XY。这解释了 7.4/8.2 的 XZ 圆弧失败：圆弧按 NX 实际的 XY frame 构造（8.2 修复后正确），但**语义上**用户要的是 XZ 平面上的圆，落在 XY 上导致旋转校验拒绝（Z 轴法向与 XY 草图法向相同→不平行）。
+- **修复**（仅 FeatureToolExecutor.cs ExecuteCreateSketch）：XZ/YZ 平面改用 `Sketch.PlaneOption.NewCsys` + `Csystem = CreateCoordinateSystem(origin, Matrix3x3, isTemporary=true)`（API 已核实 NX3+），Matrix3x3 按各平面的正交基显式构造——XZ: local X=(1,0,0), local Y=(0,0,1)（=世界Z）, local Z(法向)=(0,-1,0)；YZ: local X=(0,0,1), local Y=(0,1,0), local Z=(1,0,0)。XY 保持 ExistingPlane 不变（NX 默认行为正确）。BuildSketchProfile 已从 sketch.Orientation 读实际 frame，修复后自然与 Csys 一致。
+- **测试**：全量 **376 项 = 375 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `8dcd0b4d…`、UI `d7e5c600…`、NxHost `49eec4ba…`、Entry `d52187d3…`；NX 未运行）。
+- **遗留**：实机复验——点"几何自检"预期四场景全 ✓（caseB 的 XZ 草图应实际落在 XZ 平面上，旋转校验通过，产生圆环）；XZ U45 世界坐标映射核对（center_u=45 应映射到世界 X=45）。

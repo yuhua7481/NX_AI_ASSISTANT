@@ -72,7 +72,13 @@ public sealed partial class NxToolExecutor
 
         // Resolve the placement plane BEFORE the undo mark: selection reads
         // and plane construction must not be rolled back as model changes.
+        // Phase 8.3: XZ/YZ planes additionally produce an explicit CSYS —
+        // the live PhaseLog proved that NX's ExistingPlane + Plane(0,-1,0)
+        // gets reoriented to the XY frame (n=(0,0,1) from sketch.Orientation),
+        // so for those planes the builder's PlaneOption must be NewCsys with
+        // an explicitly constructed CartesianCoordinateSystem.
         Plane? plane;
+        CartesianCoordinateSystem? explicitCsys;
         string planeDescription;
         try
         {
@@ -84,7 +90,20 @@ public sealed partial class NxToolExecutor
                     ToolExecutionStatus.PreconditionsChanged, planeFailure,
                     workPartIdentity: workPartIdentity);
             }
-            PhaseLog.Write("execute.sketch", $"plane: {planeDescription}");
+            explicitCsys = parameters.PlaneMode switch
+            {
+                SketchPlaneMode.WcsXZ => workPart.CoordinateSystems.CreateCoordinateSystem(
+                    new Point3d(0, 0, 0),
+                    new Matrix3x3 { Xx = 1, Xy = 0, Xz = 0, Yx = 0, Yy = 0, Yz = 1, Zx = 0, Zy = -1, Zz = 0 },
+                    true),
+                SketchPlaneMode.WcsYZ => workPart.CoordinateSystems.CreateCoordinateSystem(
+                    new Point3d(0, 0, 0),
+                    new Matrix3x3 { Xx = 0, Xy = 0, Xz = 1, Yx = 0, Yy = 1, Yz = 0, Zx = -1, Zy = 0, Zz = 0 },
+                    true),
+                _ => null,
+            };
+            PhaseLog.Write("execute.sketch",
+                $"plane: {planeDescription} csys: {(explicitCsys != null ? "explicit" : "from-plane")}");
         }
         catch (Exception ex)
         {
@@ -103,8 +122,21 @@ public sealed partial class NxToolExecutor
         try
         {
             sketchBuilder = workPart.Sketches.CreateSketchInPlaceBuilder2(null!);
-            sketchBuilder.PlaneOption = Sketch.PlaneOption.ExistingPlane;
-            sketchBuilder.PlaneReference = plane;
+            if (explicitCsys != null)
+            {
+                // Phase 8.3: NX reorients ExistingPlane sketches for XZ/YZ —
+                // the live sketch.Orientation read n=(0,0,1) (XY frame) even
+                // though the Plane normal was (0,-1,0). NewCsys with an
+                // explicit CartesianCoordinateSystem forces NX to use the
+                // exact axes we provide.
+                sketchBuilder.PlaneOption = Sketch.PlaneOption.NewCsys;
+                sketchBuilder.Csystem = explicitCsys;
+            }
+            else
+            {
+                sketchBuilder.PlaneOption = Sketch.PlaneOption.ExistingPlane;
+                sketchBuilder.PlaneReference = plane;
+            }
 
             var committed = sketchBuilder.Commit() as Sketch;
             Sketch? sketch = committed ?? FindNewSketch(workPart, sketchIdsBefore);
