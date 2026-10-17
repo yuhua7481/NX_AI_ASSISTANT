@@ -429,3 +429,11 @@
 - **测试**：全量 **376 项 = 375 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误。
 - **部署**：4 DLL SHA-256 一致（Core `044ef6a3…`、UI `4bd31bae…`、NxHost `7eb0108e…`、Entry `d52187d3…`；NX 未运行）。
 - **遗留**：实机复验 caseB。若仍失败，下一排查项是 OriginOption=SpecifyPoint + SketchOrigin 指向 CSYS 原点（而非 WorkPartOrigin）。
+
+## 2026-10-17 · Phase 8.6 SimpleSketchInPlaceBuilder 修复 XZ/YZ 草图（离线验证通过；已部署；实机复验待执行）
+
+- **决定性证据**（用户录制的 NX journal，`Desktop/journal.py`）：NX GUI 在 XZ 平面创建草图用的是 **`SimpleSketchInPlaceBuilder`**（`CreateSimpleSketchInPlaceBuilder()`）——不是我们一直用的 `SketchInPlaceBuilder2`。journal 完整属性序列：`CreateFixedTypePlane(origin, matrix, update)` → `Directions.CreateDirection(origin, xDir)` → `Xforms.CreateXformByPlaneXDirPoint(plane, xDir, origin)` → `CoordinateSystems.CreateCoordinateSystem(xform, update)` → builder 设 `UseWorkPartOrigin=false`/`CoordinateSystem=csys`/`HorizontalReference.Value=xDir`/`SketchOrigin=origin` → `Commit()`。`SketchInPlaceBuilder2` 的所有变体（ExistingPlane/NewCsys+OriginOption）在 XZ/YZ 均被 NX 拒绝——**SimpleSketchInPlaceBuilder 才是 NX 自身记录的正确 builder**。
+- **修复**（FeatureToolExecutor.cs ExecuteCreateSketch）：WCS 平面（XY/XZ/YZ）改用 SimpleSketchInPlaceBuilder 路径，精确镜像 journal 序列（CreateFixedTypePlane→CreateDirection→CreateXformByPlaneXDirPoint→CreateCoordinateSystem→builder 四属性→Commit）。`ResolveWcsFrame` 提供 XYZ 三平面的正交基（center_u/v 语义不变：XZ u=X/v=Z, YZ u=Y/v=Z）。SelectedPlane 模式保留原有 face/datum 路径不变（后续可单独迁移）。BuildSketchProfile 的 sketch.Orientation frame 逻辑不变（修复后自然与 CSYS 一致）。误删的 DescribeProfile/VecNormalize/VecDot/Cross/IsPlanarFace/GetPlanarFaceFrame 已恢复。
+- **测试**：全量 **376 项 = 375 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `4890e4cb…`、UI `e84a0878…`、NxHost `4489bf65…`、Entry `d52187d3…`；NX 未运行）。
+- **遗留**：实机复验——点"几何自检"预期四场景全 ✓（caseB XZ U45 圆草图应成功提交在 XZ 平面上→旋转产生圆环）→ 场景 A/B 端到端。

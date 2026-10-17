@@ -70,46 +70,32 @@ public sealed partial class NxToolExecutor
             return failure!;
         }
 
-        // Resolve the placement plane BEFORE the undo mark: selection reads
-        // and plane construction must not be rolled back as model changes.
-        // Phase 8.3: XZ/YZ planes additionally produce an explicit CSYS —
-        // the live PhaseLog proved that NX's ExistingPlane + Plane(0,-1,0)
-        // gets reoriented to the XY frame (n=(0,0,1) from sketch.Orientation),
-        // so for those planes the builder's PlaneOption must be NewCsys with
-        // an explicitly constructed CartesianCoordinateSystem.
-        Plane? plane;
-        CartesianCoordinateSystem? explicitCsys;
+        // Resolve the placement frame BEFORE the undo mark.
+        // Phase 8.6: replaced SketchInPlaceBuilder2 entirely with
+        // SimpleSketchInPlaceBuilder — the builder NX's own GUI journal uses
+        // for File-New sketch placement. Journal evidence (user-recorded):
+        //   CreateFixedTypePlane(origin, matrix, update) for the WCS plane,
+        //   Directions for the X reference,
+        //   Xforms.CreateXformByPlaneXDirPoint(plane, xDir, origin, ...),
+        //   CoordinateSystems.CreateCoordinateSystem(xform, update),
+        //   CreateSimpleSketchInPlaceBuilder() -> UseWorkPartOrigin=false,
+        //   CoordinateSystem=csys, HorizontalReference.Value=xDir,
+        //   SketchOrigin=origin -> Commit().
+        // SketchInPlaceBuilder2 (OldCsys/ExistingPlane/NewCsys variants) all
+        // failed on XZ/YZ in live testing - the simple builder is the path
+        // NX itself records.
+        Point3d frameOrigin;
+        Vector3d frameU, frameV, frameN;
         string planeDescription;
         try
         {
-            plane = ResolveSketchPlane(workPart, parameters.PlaneMode,
-                out planeDescription, out string planeFailure);
-            if (plane == null)
+            ResolveWcsFrame(parameters.PlaneMode, out frameOrigin, out frameU, out frameV, out frameN, out planeDescription, out string? frameFailure);
+            if (frameFailure != null)
             {
                 return CreateBlockExecutionResult.Failure(
-                    ToolExecutionStatus.PreconditionsChanged, planeFailure,
+                    ToolExecutionStatus.PreconditionsChanged, frameFailure,
                     workPartIdentity: workPartIdentity);
             }
-            explicitCsys = parameters.PlaneMode switch
-            {
-                // isTemporary must be FALSE: a temporary CSYS is not displayed,
-                // not saved, and SketchInPlaceBuilder.Commit rejects it with
-                // "输入参数为空或无效" (live failure, Phase 8.4). A non-temporary
-                // CSYS becomes a real datum object that the sketch can attach
-                // to; it is created inside the UndoMark so a failed sketch
-                // rolls it back with everything else.
-                SketchPlaneMode.WcsXZ => workPart.CoordinateSystems.CreateCoordinateSystem(
-                    new Point3d(0, 0, 0),
-                    new Matrix3x3 { Xx = 1, Xy = 0, Xz = 0, Yx = 0, Yy = 0, Yz = 1, Zx = 0, Zy = -1, Zz = 0 },
-                    false),
-                SketchPlaneMode.WcsYZ => workPart.CoordinateSystems.CreateCoordinateSystem(
-                    new Point3d(0, 0, 0),
-                    new Matrix3x3 { Xx = 0, Xy = 0, Xz = 1, Yx = 0, Yy = 1, Yz = 0, Zx = -1, Zy = 0, Zz = 0 },
-                    false),
-                _ => null,
-            };
-            PhaseLog.Write("execute.sketch",
-                $"plane: {planeDescription} csys: {(explicitCsys != null ? "explicit" : "from-plane")}");
         }
         catch (Exception ex)
         {
@@ -124,34 +110,41 @@ public sealed partial class NxToolExecutor
         Session.UndoMarkId markId = session.SetUndoMark(
             Session.MarkVisibility.Visible, "NXAI 创建草图");
 
-        SketchInPlaceBuilder? sketchBuilder = null;
+        SimpleSketchInPlaceBuilder? sketchBuilder = null;
         try
         {
-            sketchBuilder = workPart.Sketches.CreateSketchInPlaceBuilder2(null!);
-            if (explicitCsys != null)
-            {
-                // Phase 8.3/8.4: NX reorients ExistingPlane sketches for XZ/YZ
-                // (live frame read n=(0,0,1) = XY), so NewCsys + an explicit
-                // CartesianCoordinateSystem is the only way to pin the axes.
-                // Phase 8.5: OriginOption must ALSO be set — the default
-                // (Infer) leaves the builder's origin unresolved and Commit
-                // fails with "输入参数为空或无效" (live failure at 8.4). The
-                // CSYS origin IS the sketch origin: WorkPartOrigin ties it to
-                // the absolute origin our CSYS was constructed with, and
-                // SketchOrigin duplicates that point explicitly.
-                sketchBuilder.PlaneOption = Sketch.PlaneOption.NewCsys;
-                sketchBuilder.Csystem = explicitCsys;
-                sketchBuilder.OriginOption = OriginMethod.WorkPartOrigin;
-                sketchBuilder.SketchOrigin = workPart.Points.CreatePoint(
-                    new Point3d(0, 0, 0));
-            }
-            else
-            {
-                sketchBuilder.PlaneOption = Sketch.PlaneOption.ExistingPlane;
-                sketchBuilder.PlaneReference = plane;
-            }
+            // Mirror NX's recorded journal sequence exactly.
+            var plane = workPart.Planes.CreateFixedTypePlane(
+                frameOrigin,
+                new Matrix3x3
+                {
+                    Xx = frameU.X, Xy = frameU.Y, Xz = frameU.Z,
+                    Yx = frameV.X, Yy = frameV.Y, Yz = frameV.Z,
+                    Zx = frameN.X, Zy = frameN.Y, Zz = frameN.Z,
+                },
+                SmartObject.UpdateOption.WithinModeling);
+
+            var xDirection = workPart.Directions.CreateDirection(
+                frameOrigin, frameU, SmartObject.UpdateOption.WithinModeling);
+
+            var originPoint = workPart.Points.CreatePoint(frameOrigin);
+
+            var xform = workPart.Xforms.CreateXformByPlaneXDirPoint(
+                plane, xDirection, originPoint,
+                SmartObject.UpdateOption.WithinModeling, 0.625, false, false);
+
+            var csys = workPart.CoordinateSystems.CreateCoordinateSystem(
+                xform, SmartObject.UpdateOption.WithinModeling);
+
+            sketchBuilder = workPart.Sketches.CreateSimpleSketchInPlaceBuilder();
+            sketchBuilder.UseWorkPartOrigin = false;
+            sketchBuilder.CoordinateSystem = csys;
+            sketchBuilder.HorizontalReference.Value = xDirection;
+            sketchBuilder.SketchOrigin = originPoint;
 
             var committed = sketchBuilder.Commit() as Sketch;
+            sketchBuilder.Destroy();
+            sketchBuilder = null;
             Sketch? sketch = committed ?? FindNewSketch(workPart, sketchIdsBefore);
             if (sketch == null)
             {
@@ -205,94 +198,56 @@ public sealed partial class NxToolExecutor
         }
     }
 
+    /// <summary>
+    /// WCS plane frames: center_u maps to the first named world axis of the
+    /// plane (XY->X, XZ->X, YZ->Y) and center_v to the second (XY->Y, XZ->Z,
+    /// YZ->Z). Normals follow right-handed u-cross-v: XY->+Z, XZ->-Y
+    /// (matching NX's fixed-type XZ plane convention), YZ->+X.
+    /// SelectedPlane mode is not handled here (face/datum path unchanged).
+    /// </summary>
+    private static void ResolveWcsFrame(
+        SketchPlaneMode mode,
+        out Point3d origin, out Vector3d u, out Vector3d v, out Vector3d n,
+        out string description, out string? failure)
+    {
+        origin = new Point3d(0, 0, 0);
+        failure = null;
+        switch (mode)
+        {
+            case SketchPlaneMode.WcsXY:
+                u = new Vector3d(1, 0, 0);
+                v = new Vector3d(0, 1, 0);
+                n = new Vector3d(0, 0, 1);
+                description = "绝对坐标 XY 平面";
+                break;
+            case SketchPlaneMode.WcsXZ:
+                u = new Vector3d(1, 0, 0);
+                v = new Vector3d(0, 0, 1);
+                n = new Vector3d(0, -1, 0);
+                description = "绝对坐标 XZ 平面";
+                break;
+            case SketchPlaneMode.WcsYZ:
+                u = new Vector3d(0, 1, 0);
+                v = new Vector3d(0, 0, 1);
+                n = new Vector3d(1, 0, 0);
+                description = "绝对坐标 YZ 平面";
+                break;
+            default:
+                u = v = n = new Vector3d(0, 0, 0);
+                description = "";
+                failure = $"不支持的草图平面模式：{mode}（selected_plane 请使用已有的选中面路径）。";
+                break;
+        }
+    }
+
+
+    /// <summary>
     private static string DescribeProfile(CreateSketchParameters p) => p.ProfileType switch
     {
         SketchProfileType.Rectangle =>
             $"矩形 {FormatLength(p.RectangleWidth)} × {FormatLength(p.RectangleHeight)} 毫米",
         _ => $"圆形直径 {FormatLength(p.CircleDiameter)} 毫米",
     };
-
-    /// <summary>
-    /// Resolves the placement plane from the mode. SelectedPlane requires
-    /// exactly one selected planar face or datum plane — never guesses.
-    /// WCS planes use the absolute coordinate frame (XY normal +Z, XZ normal
-    /// −Y, YZ normal +X; right-handed u×v=n).
-    /// </summary>
-    private Plane? ResolveSketchPlane(
-        Part workPart, SketchPlaneMode mode,
-        out string description, out string failure)
-    {
-        description = "";
-        failure = "";
-        string planeDescription = "";
-        switch (mode)
-        {
-            case SketchPlaneMode.SelectedPlane:
-            {
-                var selected = new List<NXObject>();
-                var uiSelection = NXOpen.UI.GetUI().SelectionManager;
-                int count = uiSelection.GetNumSelectedObjects();
-                for (int i = 0; i < count; i++)
-                {
-                    if (uiSelection.GetSelectedTaggedObject(i) is NXObject obj)
-                        selected.Add(obj);
-                }
-                var faces = new List<Face>();
-                var datumPlanes = new List<DatumPlane>();
-                foreach (var obj in selected)
-                {
-                    if (obj is Face f && IsPlanarFace(f)) faces.Add(f);
-                    else if (obj is DatumPlane dp) datumPlanes.Add(dp);
-                }
-                if (faces.Count + datumPlanes.Count != 1)
-                {
-                    failure = "selected_plane 需要恰好选中一个平面或基准面" +
-                        $"（当前选中：{faces.Count} 个平面、{datumPlanes.Count} 个基准面，共 {selected.Count} 个对象）。" +
-                        "请在 NX 中只选中一个目标平面后重新发起请求。";
-                    return null;
-                }
-                if (faces.Count == 1)
-                {
-                    var face = faces[0];
-                    GetPlanarFaceFrame(face, out Point3d origin, out Vector3d normal);
-                    Plane frame = workPart.Planes.CreatePlane(
-                        origin, normal, SmartObject.UpdateOption.WithinModeling);
-                    planeDescription = "选中的平面";
-                    description = planeDescription;
-                    return frame;
-                }
-                var datum = datumPlanes[0];
-                Plane datumFrame = workPart.Planes.CreatePlane(
-                    datum.Origin, datum.Normal, SmartObject.UpdateOption.WithinModeling);
-                planeDescription = "选中的基准面";
-                description = planeDescription;
-                return datumFrame;
-            }
-            case SketchPlaneMode.WcsXY:
-                description = planeDescription = "绝对坐标 XY 平面";
-                return workPart.Planes.CreatePlane(
-                    new Point3d(0, 0, 0), new Vector3d(0, 0, 1), SmartObject.UpdateOption.WithinModeling);
-            case SketchPlaneMode.WcsXZ:
-                description = planeDescription = "绝对坐标 XZ 平面";
-                return workPart.Planes.CreatePlane(
-                    new Point3d(0, 0, 0), new Vector3d(0, -1, 0), SmartObject.UpdateOption.WithinModeling);
-            case SketchPlaneMode.WcsYZ:
-                description = planeDescription = "绝对坐标 YZ 平面";
-                return workPart.Planes.CreatePlane(
-                    new Point3d(0, 0, 0), new Vector3d(1, 0, 0), SmartObject.UpdateOption.WithinModeling);
-            default:
-                failure = $"不支持的草图平面模式：{mode}。";
-                return null;
-        }
-    }
-
-    private static Vector3d VecNormalize(Vector3d v)
-    {
-        double len = Math.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
-        return len < 1e-12 ? new Vector3d(0, 0, 0) : new Vector3d(v.X / len, v.Y / len, v.Z / len);
-    }
-
-    private static double VecDot(Vector3d a, Vector3d b) => a.X * b.X + a.Y * b.Y + a.Z * b.Z;
 
     private static bool IsPlanarFace(Face face)
     {
@@ -306,12 +261,21 @@ public sealed partial class NxToolExecutor
         }
     }
 
+    private static Vector3d VecNormalize(Vector3d v)
+    {
+        double len = Math.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+        return len < 1e-12 ? new Vector3d(0, 0, 0) : new Vector3d(v.X / len, v.Y / len, v.Z / len);
+    }
+
+    private static double VecDot(Vector3d a, Vector3d b) => a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+
+    private static Vector3d Cross(Vector3d a, Vector3d b) =>
+        new(a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+
     /// <summary>
-    /// Computes a deterministic right-handed frame on a planar face:
-    /// origin = UV-midpoint representative point, normal = unit normal,
-    /// u = projection of the world X axis (world Y when nearly parallel),
-    /// v = n × u. Same UF APIs as the face-relative cylinder (UF_MODL APIs,
-    /// never UFEvalsf on planar faces).
+    /// Computes a deterministic representative point and unit normal for a
+    /// planar face via the verified UF_MODL APIs (never UFEvalsf on planar
+    /// faces — Phase 5.1 crash root cause).
     /// </summary>
     private static void GetPlanarFaceFrame(Face face, out Point3d origin, out Vector3d normal)
     {
@@ -329,9 +293,6 @@ public sealed partial class NxToolExecutor
         origin = new Point3d(center[0], center[1], center[2]);
         normal = VecNormalize(new Vector3d(unitNorm[0], unitNorm[1], unitNorm[2]));
     }
-
-    private static Vector3d Cross(Vector3d a, Vector3d b) =>
-        new(a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
 
     /// <summary>
     /// Builds the closed profile inside the activated sketch. Geometry points
