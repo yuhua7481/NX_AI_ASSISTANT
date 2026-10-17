@@ -173,8 +173,24 @@ public sealed class NxContextReader
                 };
             case IBaseCurve:
                 return new NxSelectionItem { Kind = "curve", Subtype = "curve", Name = SafeJournalId(obj) };
+            case Sketch sketch:
+                // A selected sketch is the object users pick for extrude/
+                // revolve requests — labeling it "other" hid the fact that
+                // the selection WAS usable (Phase 7.4 root cause D).
+                return new NxSelectionItem
+                {
+                    Kind = "sketch",
+                    Subtype = sketch.IsActive ? "active" : "inactive",
+                    Name = SafeJournalId(sketch),
+                };
             default:
-                return new NxSelectionItem { Kind = "other", Name = SafeJournalId(obj) };
+                // Keep the real runtime type so "other" is never a dead end.
+                return new NxSelectionItem
+                {
+                    Kind = "other",
+                    Subtype = obj.GetType().Name,
+                    Name = SafeJournalId(obj),
+                };
         }
     }
 

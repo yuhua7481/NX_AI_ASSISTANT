@@ -347,8 +347,18 @@ public sealed partial class NxToolExecutor
             {
                 double r = parameters.CircleDiameter / 2.0;
                 var center = ProfilePoint(parameters.CenterU, parameters.CenterV);
+                // CreateArc's normal is xDir × yDir (verified NXOpen docs:
+                // "whose normal is Z axis"). The sketch plane's normal is the
+                // plane frame's n; the frame is right-handed (v = n × u), so
+                // passing (u, n × u) yields normal = u × (n × u) = n. Passing
+                // the frame's v directly is WRONG when v ≠ n × u — for XZ
+                // (u=+X, v=+Z) the cross product is −Y, the reverse of the
+                // sketch normal +Y, and AddGeometry rejected the arc with
+                // "圆弧的平面必须与草图平面平行" (Phase 7.4 root cause A).
+                var n = VecNormalize(Cross(u, v));
+                var arcY = VecNormalize(Cross(n, u));
                 Arc circle = workPart.Curves.CreateArc(
-                    center, u, v, r, 0.0, 2.0 * Math.PI);
+                    center, u, arcY, r, 0.0, 2.0 * Math.PI);
                 sketch.AddGeometry(circle, Sketch.InferConstraintsOption.InferNoConstraints);
             }
             sketch.Update();
@@ -855,13 +865,29 @@ public sealed partial class NxToolExecutor
 
         Sketch? sketch;
         string? sketchError;
+        PhaseLog.Write("execute.revolve", $"resolve begin ref={parameters.SketchRef}");
         (sketch, sketchError) = ResolveSketchRef(workPart, parameters.SketchRef);
         if (sketch == null)
         {
+            PhaseLog.Write("execute.revolve", $"resolve FAIL: {sketchError}");
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.PreconditionsChanged, sketchError!,
                 workPartIdentity: workPartIdentity);
         }
+        // Liveness gate BEFORE any builder is created: a stale reference
+        // (e.g. to a sketch rolled back moments earlier) reaching
+        // RevolveBuilder.CommitFeature caused a native access violation in
+        // live testing (Phase 7.4 root cause B). Refuse managed-side instead.
+        if (IsDead(sketch))
+        {
+            PhaseLog.Write("execute.revolve", "resolve FAIL: sketch object not alive");
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.PreconditionsChanged,
+                "草图对象已失效（可能已被撤销），无法旋转。请重新创建草图后再执行。",
+                workPartIdentity: workPartIdentity);
+        }
+        PhaseLog.Write("execute.revolve",
+            $"resolve ok id={sketch.JournalIdentifier} name={sketch.Name} active={sketch.IsActive}");
 
         // Resolve the axis BEFORE the undo mark (selection read).
         Point3d axisPoint;
@@ -936,7 +962,14 @@ public sealed partial class NxToolExecutor
             revolveBuilder.Limits.StartExtend.Value.SetFormula("0");
             revolveBuilder.Limits.EndExtend.Value.SetFormula(
                 FormatLength(parameters.AngleDeg));
+            PhaseLog.Write("execute.revolve",
+                $"builder configured: axis={axisDescription} angle={parameters.AngleDeg}");
 
+            // NOTE: a stale sketch reference reaching this point crashed NX
+            // with a native access violation in live testing (Phase 7.4
+            // root cause B) — the IsDead gate above exists precisely to
+            // prevent this path. An AV here is process-fatal and cannot be
+            // caught; the gate + PhaseLog trail are the defenses.
             revolveBuilder.CommitFeature();
             session.UpdateManager.DoUpdate(markId);
             PhaseLog.Write("execute.revolve", "commit done");

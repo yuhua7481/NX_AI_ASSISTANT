@@ -286,3 +286,15 @@
 - **测试**：新增 ToolTagCompatAndChainTests 8 项 + 更新 3 个 round-cap 旧契约测试。全量 **352 项 = 351 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `8767fbe5…`、UI `08376a86…`、NxHost `68d4ce4e…`、Entry `baf508fc…`；NX 未运行）。
 - **遗留**：实机验收（自主模式一句话两步建模、确认模式逐步确认、取消/失败路径）；profile 参数名如再次出现按截图证据决定。
+
+## 2026-10-17 · Phase 7.4 稳定性修复：圆弧平面对齐 + 旋转失效引用门禁 + 上下文 Sketch 识别（离线验证通过；实机验收待执行）
+
+- **故障矩阵**（%TEMP% 日志 + 异常日志取证，非猜测）：
+  ① XZ 平面 U45 圆草图 5 次失败——真实异常 `NXException: 圆弧的平面必须与草图平面平行`（AddGeometry 处），**不是**"不活动对象"（外层 catch 的误导翻译）；XY 同类创建成功。
+  ② 绕 Z 轴旋转 360 失败——真实异常 `FeatureBuilder.CommitFeature()` 处**内存访问违例(AV)**；日志显示该次旋转引用的 SKETCH(1) 是 1 分钟前刚被回滚的草图——失效引用传入 RevolveBuilder 触发原生 AV。
+  ③ "请求超时"= 模型 HTTP 阶段（日志大段无 execute.* 空档佐证）。
+  ④ 上下文把选中对象报为 `other`——DescribeObject 无 Sketch case，用户选草图准备拉伸时被归为未知。
+- **修复**：① BuildSketchProfile 圆构造改为 arcY = planeNormal × u（从草图附加平面自身法向推导 yDir，保证 arc 平面与草图平面精确对齐；XY/XZ/YZ 三 frame 数学验证）；② ExecuteCreateRevolve 解析草图后加 IsDead 门禁（7.2 只加在 extrude，revolve 漏了）+ resolve 阶段日志 + Commit 前警示注释（AV 进程级不可 catch，门禁是唯一防线）；③ NxContextReader 新增 Sketch case（kind=sketch，subtype=active/inactive）+ other 保留真实运行时类型名。
+- **测试**：新增 PlaneFrameHandednessTests 4 项（三平面 arc 法向=附加平面法向不变式 + XZ 根因文档化）。全量 **356 项 = 355 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `d0afe62e…`、UI `5638d87d…`、NxHost `d344c6d1…`、Entry `8d6a2b38…`；NX 未运行）。
+- **遗留**：实机验收按 7.4 报告顺序（XY 圆→独立拉伸→XZ U45 圆→绕 Z 旋转 360→重复原故障流）；revolve limits 角度单位语义列入观察项；超时不自动重试已由既有回合机制保证。
