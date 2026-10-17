@@ -320,3 +320,12 @@
 - **测试**：新增 SelfCheckTemplateDiscoveryTests 3 项（优先级排序、兜底、空目录不静默回退）。全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `699a61aa…`、UI `a0ef6a58…`、NxHost `a5851fe5…`、Entry `a3fed257…`；NX 未运行）。
 - **遗留**：实机复验——点击"几何自检"应创建临时部件并完成四场景；若 setup 仍失败，报告将给出实际模板目录与候选（不再是无诊断的"模板不存在"）。隔离/清理/恢复逻辑未改动。
+
+## 2026-10-17 · Phase 8.1.1 FileNew 模板注册语义修复（离线验证通过；实机复验待执行）
+
+- **再取证**：PhaseLog 证实 8.1 的模板发现已生效（绝对路径 `model-plain-1-mm-template.prt` 正确传入），但 `FileNew.Commit` 仍抛"选定的模板不存在"——问题不在路径，在**解析方式**。
+- **根因核实**：本机 `UGII/templates/ugs_model_templates.pax` 注册表显示模板按 **Presentation name="Model" + Filename + Units=Metric** 注册；FileNew 的 TemplateFileName 解析走**模板注册表**（按 ApplicationName 键控），裸绝对路径不是注册表查找键。
+- **修复**（仅 NxGeometrySelfCheck.CreateTempPart）：设置 `ApplicationName="Model"`（FileNew 属性已核实），**双候选依次尝试**——①注册表文件名（model-plain-1-mm-template.prt）+ Model 应用；②绝对路径兜底；每次尝试的异常类型+消息记入 PhaseLog 与最终诊断（`尝试记录：…`），候选循环中 builder Destroy 全路径保证。
+- **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `72e12c11…`、UI `bbb91128…`、NxHost `2f8e6d30…`、Entry `a3fed257…`；NX 未运行）。
+- **遗留**：实机复验自检按钮。若两候选都失败，诊断将包含两条尝试的精确异常——按证据决定下一步（如检查注册表应用名大小写/使用 udm 变体注册表）。
