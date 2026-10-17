@@ -391,3 +391,11 @@
 - **报告**：`docs/reports/COMPREHENSIVE_ACCEPTANCE_20261017.md`（含清单表、分域测试统计、实机待执行清单）。
 - **Git**：本地 HEAD=412b1ad（=上次确认的远端 HEAD，无新提交需推送）；验收期间 GitHub 探测连接失败（间歇性，不影响交付）。
 - **结论**：离线层全通过；实机层待用户执行五项（几何自检复验、场景 A/B、布尔、模式对比）——在场景 A/B 真实通过前不开始新功能。
+
+## 2026-10-17 · Phase 8.2 统一自动化验收入口 + 补充回归测试（离线验证通过；已部署）
+
+- **新增 `scripts/run-acceptance.ps1`**：PowerShell 5.1 兼容（UTF-8 BOM），四种模式（Offline/NxSelfCheck/ModelE2E/All）；8 项检查（构建/全量测试/diff-check/Core 无 NXOpen/活跃执行器无保存路径/注册表 8 工具/允许清单/部署哈希）；输出 `artifacts/acceptance/latest.json` + `latest.md`；关键失败退出码 1。含一个已知修正：活跃执行器保存路径检查缩小到三个执行器文件（BlockFeatureCreator 是 Phase 0 遗留测试工具，不在当前工具链）。
+- **新增 IndependentRequestChainTests 3 项**：跨轮独立请求（sketch→独立轮次 extrude 引用解析）、失效引用拒绝（不产生几何、无假成功）、空白模板候选契约（UseBlankTemplate=true + 空 TemplatePresentationName 配对钉死）。
+- **验收运行结果**：Offline 模式 8/8 全部 Passed（重部署后）；deploy.hashmatch 在重建后正确检测过期部署（预期行为——重建后需重部署）。
+- **部署**：4 DLL SHA-256 一致（Core `f9aa4e3c…`、UI `9b9b7959…`、NxHost `6916327c…`、Entry `d52187d3…`；NX 未运行）。
+- **遗留**：a81bd72（综合验收报告）+ 本轮提交待推送（GitHub 间歇不可达）；实机五项清单不变。
