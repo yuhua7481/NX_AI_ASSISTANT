@@ -73,7 +73,7 @@ public class ToolTagProtocolTests
         Assert.True(result.Success);
         var call = Assert.Single(result.ToolCalls);
         Assert.Equal("create_extrude", call.FunctionName);
-        Assert.Equal("tagcall_", call.Id[..^1]); // synthesized stable id
+        Assert.StartsWith("tagcall_", call.Id); // synthesized stable id
 
         using var doc = JsonDocument.Parse(call.ArgumentsJson);
         Assert.Equal("SKETCH_000", doc.RootElement.GetProperty("sketch_ref").GetString());

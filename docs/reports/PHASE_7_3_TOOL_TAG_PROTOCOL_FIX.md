@@ -52,3 +52,21 @@ NX 未运行，4 DLL 部署 SHA-256 与构建产物逐一一致：Core `22e6fe97
 
 - 适配层只支持"content 内完整 invoke 块"这一种可严格解析形态；其他变体（流式分片、异常属性顺序、嵌套块）按协议错误安全拒绝——宁可拒绝不猜测。
 - 请求侧 tools 声明保持标准 OpenAI function 格式不变。
+
+---
+
+## Phase 7.3.1（2026-10-17）：工具名别名与方向值映射
+
+**实机补充证据**：自主模式下模型实际输出 `extrude`（短名，非注册名 `create_extrude`）与 `direction=positive_z`（非 schema 值 normal/reverse）——7.3 适配层虽能解析块结构，但归一化后 `extrude` 不在注册表、`positive_z` 不在方向枚举，仍被拒绝。
+
+**修复**（[ToolTagProtocol.cs](../../src/NXAI.Assistant.Core/ToolTagProtocol.cs) 新增封闭映射表）：
+- **工具别名表**（显式、封闭）：`extrude` → `create_extrude`。仅在有已核实语义时新增条目，不做模糊匹配、不做字符串替换绕过注册表；未别名化的未知名原样传给注册表拒绝。
+- **方向值映射**（仅 create_extrude 的 direction 参数）：`positive_z` → `normal`（schema 的 normal 即草图平面法向 = XY 草图的 +Z，语义核实后准入）；其他值原样传给类型化解析器拒绝。
+- `profile`/`SKETCH_000`/`distance=50`/`unit=mm` 均不在映射范围：SKETCH_000 本就是 NXHost 管理的受控引用（JournalIdentifier）原样传递；模型若用 `profile` 而非 schema 字段 `sketch_ref`，类型化解析器按未知字段拒绝——**适配层不做参数名猜测**。
+- 结构化 tool_calls 优先级、回填协议、ExecutionModePolicy、NX 执行链全部不变。
+
+**测试**：新增 ToolTagAliasTests 8 项（截图样例、别名+方向映射到真实类型化解析器、positive_z→normal 语义断言、非法方向拒绝、受控引用原样传递、未知别名不重写、其他工具不受影响、结构化调用 id 保留）。全量 **344 项 = 343 通过 / 0 失败 / 1 跳过**。
+
+**部署**：Core.dll SHA-256 `91780fdf…` 与构建产物一致。
+
+**实机验收（待执行）**：重启插件加载新 DLL → 自主模式对既有 SKETCH_000 请求 +Z 拉伸 50mm → 聊天无原始标签、PhaseLog 显示进入 create_extrude → 包围盒 30×30×50 → 确认模式复测确认卡。注意：**若模型继续用 `profile` 字段名，调用会被类型化解析器拒绝（未知字段）**——如复现，需按截图原始输出决定是否将 `profile` 列入已核实别名（当前无证据表明应静默改写参数名，不猜）。

@@ -195,12 +195,15 @@ internal static partial class ToolTagProtocol
         }
 
         // Convert to a JSON object string so the typed parsers downstream
-        // see the same shape as a structured tool call's arguments. All
-        // values are strings here; the per-tool typed parsers validate and
-        // coerce (string-encoded numbers are already tolerated there).
+        // see the same shape as a structured tool call's arguments. Tool
+        // aliases and known enum-value spellings are normalized here, at
+        // this single explicit point — registry, schema and authorization
+        // checks stay downstream, unchanged.
+        var (canonicalName, normalized) = NormalizeArguments(functionName, parameters);
+
         var json = new StringBuilder("{");
         bool first = true;
-        foreach (var (key, value) in parameters)
+        foreach (var (key, value) in normalized)
         {
             if (!first)
                 json.Append(',');
@@ -209,6 +212,61 @@ internal static partial class ToolTagProtocol
             json.Append(JsonSerializer.Serialize(value));
         }
         json.Append('}');
-        return (functionName, json.ToString(), null);
+        return (canonicalName, json.ToString(), null);
+    }
+
+    // ------------------------------------------------------------ normalization
+
+    /// <summary>
+    /// Explicit, closed alias table for tool names observed from real model
+    /// output. An entry is added only after its semantics were verified
+    /// against the registered tool's schema — never by fuzzy matching.
+    /// </summary>
+    private static readonly Dictionary<string, string> ToolAliases =
+        new(StringComparer.Ordinal)
+        {
+            // Live model output (Phase 7.3.1 screenshot) calls the registered
+            // create_extrude tool by the short name "extrude".
+            ["extrude"] = CreateExtrudeTool.Name,
+        };
+
+    /// <summary>
+    /// Explicit direction-value spellings accepted from tag-protocol
+    /// arguments, mapped to the create_extrude schema's values
+    /// (normal|reverse). Anything else passes through untouched and is
+    /// rejected by the typed parser — the model cannot invent axes here;
+    /// the schema enum and parser remain the authority.
+    /// </summary>
+    private static readonly Dictionary<string, string> ExtrudeDirectionAliases =
+        new(StringComparer.Ordinal)
+        {
+            // "positive_z": the schema's "normal" direction IS the sketch
+            // plane normal (+Z for the XY-plane sketches this tool creates);
+            // semantics verified against CreateExtrudeTool's documented
+            // contract before admission.
+            ["positive_z"] = "normal",
+        };
+
+    private static (string CanonicalName, List<KeyValuePair<string, string>> Arguments) NormalizeArguments(
+        string functionName,
+        Dictionary<string, string> parameters)
+    {
+        var canonical = ToolAliases.TryGetValue(functionName, out var mapped)
+            ? mapped
+            : functionName;
+
+        var result = new List<KeyValuePair<string, string>>(parameters.Count);
+        foreach (var (key, value) in parameters)
+        {
+            if (canonical == CreateExtrudeTool.Name &&
+                key == "direction" &&
+                ExtrudeDirectionAliases.TryGetValue(value.Trim(), out var direction))
+            {
+                result.Add(new(key, direction));
+                continue;
+            }
+            result.Add(new(key, value));
+        }
+        return (canonical, result);
     }
 }

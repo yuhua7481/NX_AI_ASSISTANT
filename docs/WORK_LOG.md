@@ -270,3 +270,11 @@
 - **测试**：新增 ToolTagProtocolTests 15 项（含"错误信息不含原始标记"断言、run_shell 未注册工具用例、适配输出喂真实类型化解析器）。测试捕获并修复适配器边界 bug（Scan 块结束标签用错）。全量 **336 项 = 335 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：NX 未运行，4 DLL SHA-256 一致（Core `22e6fe97…`、UI `488f5c05…`、NxHost `50580d4c…`、Entry `baf508fc…`）。
 - **遗留**：实机验收 7 项（报告 §5，重点第 3 项：聊天不再显示原始标记）；Phase 7.2 拉伸实机验收与 Phase 6 遗留项仍待执行。
+
+## 2026-10-17 · Phase 7.3.1 工具名别名与方向值映射（离线验证通过；实机验收待执行）
+
+- **补充证据**：实机截图显示模型用短名 `extrude`（非注册名 create_extrude）和 `direction=positive_z`（非 schema 值）——7.3 适配层解析块成功但下游注册表/枚举拒绝。
+- **修复**（仅 ToolTagProtocol.cs）：显式封闭映射表——工具别名 `extrude→create_extrude`（仅此一条，语义核实后准入，无模糊匹配）；方向值 `positive_z→normal`（仅 create_extrude.direction，schema 的 normal 即 XY 草图 +Z 法向）。`profile` 参数名**不**静默改写（无证据支持，交类型化解析器按未知字段拒绝并在报告中说明）；SKETCH_000 受控引用原样传递；结构化路径/回填/授权/执行链不变。
+- **测试**：新增 ToolTagAliasTests 8 项（截图样例归一化、别名+方向直达真实类型化解析器、非法方向拒绝、受控引用不变、未知别名不重写、其他工具不受影响、结构化 id 保留）。修正 7.3 测试的 id 前缀断言（tagcall_N 计数器两位数时 [^1] 截断错误→StartsWith）。全量 **344 项 = 343 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：Core.dll SHA-256 `91780fdf…` 一致（NX 未运行）。
+- **遗留**：实机验收 7 项；**若模型继续用 profile 参数名，类型化解析器将拒绝（未知字段）——复现时按截图证据决定是否准入参数名别名，当前不猜**。待推送提交：b9bf600、4ca020e、本轮新提交。
