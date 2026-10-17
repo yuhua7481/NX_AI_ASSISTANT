@@ -261,3 +261,12 @@
 - **测试**：全量 **321 项 = 320 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。验证/Section 逻辑需 NX 会话，离线不可直接单测（边界已在报告声明）。
 - **部署**：NX 未运行，NxHost.NX2512.dll 部署 SHA-256 一致（`35769ba8…`）。
 - **遗留**：实机验收 8 项（报告 §5：独立请求拉伸 d30×50、包围盒核对、两模式、失败取消路径、阶段日志核对）；缺陷 B 修复的实机有效性以验收为准（报告 §6 如实声明）。
+
+## 2026-10-17 · Phase 7.3 修复工具调用协议标记泄漏到聊天（离线验证通过；实机验收待执行）
+
+- **故障**：create_sketch 成功后，模型输出的 invoke/parameter 原始控制标记直接显示在聊天界面，无工具执行反馈。
+- **审计**：ParseChatCompletionResponse 只认结构化 tool_calls；GLM 推理模型（nvidia_nim）部分轮次把调用写成 message.content 内标签块 → OkText → 聊天渲染原文。结构化路径（tool_call_id/回填）本身无缺陷；注册名确认为 create_extrude 不变。
+- **修复**：新增 Core/ToolTagProtocol.cs 受限适配层——content 含完整良构 invoke 块→严格解析（函数名白名单正则、参数严格映射、重复/空名/未闭合/杂散文本全拒绝）→转为与结构化路径相同的 ParsedToolCall（合成 tagcall_N id）→下游注册表/Schema/ExecutionModePolicy/NX 线程/回滚原样生效；不完整块→协议错误（不渲染原文）；纯文本/结构化路径不受影响。标记常量源码内片段拼接。ModelService.ParseChatCompletionResponse 接入。
+- **测试**：新增 ToolTagProtocolTests 15 项（含"错误信息不含原始标记"断言、run_shell 未注册工具用例、适配输出喂真实类型化解析器）。测试捕获并修复适配器边界 bug（Scan 块结束标签用错）。全量 **336 项 = 335 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：NX 未运行，4 DLL SHA-256 一致（Core `22e6fe97…`、UI `488f5c05…`、NxHost `50580d4c…`、Entry `baf508fc…`）。
+- **遗留**：实机验收 7 项（报告 §5，重点第 3 项：聊天不再显示原始标记）；Phase 7.2 拉伸实机验收与 Phase 6 遗留项仍待执行。

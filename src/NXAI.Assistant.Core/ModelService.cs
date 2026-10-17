@@ -632,6 +632,15 @@ public sealed class ModelService
     /// Parses a chat-completions response body that may contain tool calls.
     /// An assistant message with empty content and valid tool_calls is valid;
     /// parallel tool calls (more than one) are rejected as unsupported.
+    ///
+    /// Phase 7.3: some reasoning models (observed with z-ai GLM behind
+    /// OpenAI-compatible gateways) emit the tool call as XML-ish tags inside
+    /// message.content instead of the tool_calls array. Such content is run
+    /// through the restricted <see cref="ToolTagProtocol"/> adapter: a
+    /// complete, well-formed block becomes a typed tool call (same
+    /// registry/schema/authorization path as structured calls); an
+    /// incomplete or malformed block becomes a protocol error so the raw
+    /// control markers never reach the chat display.
     /// </summary>
     internal static ChatCompletionResult ParseChatCompletionResponse(string responseBody)
     {
@@ -671,6 +680,28 @@ public sealed class ModelService
                 return ChatCompletionResult.OkToolCalls(toolCalls);
             }
 
+            // No structured tool_calls. If the model emitted its call as an
+            // in-content tag block, run the restricted adapter; otherwise the
+            // content is plain text.
+            if (text != null && ToolTagProtocol.ContainsToolMarker(text))
+            {
+                var scan = ToolTagProtocol.Scan(text);
+                if (scan.ProtocolError != null)
+                {
+                    return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, scan.ProtocolError);
+                }
+                if (scan.ToolCall != null)
+                {
+                    return ChatCompletionResult.OkToolCalls(
+                        [new ParsedToolCall(NewTagCallId(), scan.ToolCall.FunctionName, scan.ToolCall.ArgumentsJson)]);
+                }
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, "模型响应内容为空。");
+                }
+                return ChatCompletionResult.OkText(text);
+            }
+
             if (string.IsNullOrWhiteSpace(text))
             {
                 return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, "模型响应内容为空。");
@@ -682,6 +713,16 @@ public sealed class ModelService
             return ChatCompletionResult.Fail(ModelChatError.InvalidResponse, "模型响应不是合法 JSON。");
         }
     }
+
+    /// <summary>
+    /// Synthesizes the tool_call id for tag-protocol calls: the model did not
+    /// provide one (there is no structured tool_calls entry), but the
+    /// round-trip back through the protocol (assistant tool_calls + tool
+    /// result) requires a stable id. Deterministic counter — no secrets.
+    /// </summary>
+    private static int _tagCallIdCounter;
+
+    internal static string NewTagCallId() => $"tagcall_{Interlocked.Increment(ref _tagCallIdCounter)}";
 
     private static IReadOnlyList<ParsedToolCall> ParseToolCalls(
         JsonElement message, out string? error)
