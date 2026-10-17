@@ -347,3 +347,12 @@
 - **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `7c8357d3…`、UI `2235deb2…`、NxHost `e9274a37…`、Entry `a3fed257…`；NX 未运行）。
 - **遗留**：实机复验——PhaseLog 将列出 NX 认可的全部模板名；若查询返回空表，诊断指向 customer defaults 模板配置（环境问题，按报告解决）。
+
+## 2026-10-17 · Phase 8.1.4 改用 GetApplicationNames + GetAvailableTemplates（离线验证通过；实机复验待执行）
+
+- **再取证**：8.1.3 的 `GetMatchingTemplates(FileNewApplication, Units)` 抛"遇到无效的函数参数"——枚举版 API（NX9 起过时）在本机 NX2512 已不可用。
+- **正解（NXOpen.xml 核实）**：`FileNew.GetApplicationNames()`（NX9+，返回全部注册应用名，文档明确"These names should be used while setting the ApplicationName"）+ `FileNew.GetAvailableTemplates()`（NX6+，无参数，返回**当前 builder 状态**下可用的模板名数组）。
+- **修复**（仅 CreateTempPart）：①GetApplicationNames 枚举（全部记 PhaseLog）；②选含 "model" 的应用名设 ApplicationName；③GetAvailableTemplates 枚举（全部记 PhaseLog）；④优先含 "-mm-"/"-mm.prt" 的模板名（文件命名约定，不猜单位），否则取第一个；⑤官方 journal 属性全集提交。空列表均有指向 customer defaults 的诊断。
+- **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `9d54a283…`、UI `77990507…`、NxHost `8450e292…`、Entry `a3fed257…`；NX 未运行）。
+- **遗留**：实机复验——PhaseLog 的 `nx application`/`nx template` 行将列出 NX 认可的全部应用与模板名；若列表为空则按诊断指向环境配置。
