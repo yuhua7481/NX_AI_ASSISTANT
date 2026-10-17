@@ -111,14 +111,78 @@ public sealed class NxGeometrySelfCheck
                 c.Name, c.Passed, c.Stage, c.Input, c.Expected, c.Actual, c.Error)).ToList());
     }
 
-    /// <summary>Creates an unsaved millimeter part from the blank template.
-    /// TemplateFile name follows the install's metric blank template
-    /// (verified file-new flow); NewFileName is a %TEMP% path so NX never
-    /// touches a user file.</summary>
+    /// <summary>
+    /// Discovers a millimeter modeling template for the self-check part.
+    /// Never a hardcoded name: candidate template directories come from the
+    /// NX environment (UGII_TEMPLATE_DIR when defined, else the install's
+    /// UGII\templates resolved from the running session's base dir), the
+    /// candidates are validated for existence, and preference is given to
+    /// model-plain metric templates (name contains "model-plain" and "-mm-")
+    /// whose units match by file naming convention. Returns the absolute
+    /// path of the first existing candidate.
+    /// </summary>
+    internal static string DiscoverMillimeterTemplate(out string searchedDirectories)
+    {
+        var directories = new List<string>();
+        var envTemplateDir = Environment.GetEnvironmentVariable("UGII_TEMPLATE_DIR");
+        if (!string.IsNullOrWhiteSpace(envTemplateDir) && Directory.Exists(envTemplateDir))
+            directories.Add(envTemplateDir);
+
+        // Session base dir: the running NX install (UGII root's parent).
+        try
+        {
+            var sessionBaseDir = Session.GetSession()
+                .GetEnvironmentVariableValue("UGII_BASE_DIR");
+            if (!string.IsNullOrWhiteSpace(sessionBaseDir))
+            {
+                var templateDir = Path.Combine(sessionBaseDir, "UGII", "templates");
+                if (Directory.Exists(templateDir) &&
+                    !directories.Contains(templateDir, StringComparer.OrdinalIgnoreCase))
+                {
+                    directories.Add(templateDir);
+                }
+            }
+        }
+        catch
+        {
+            // Env var unavailable: directory list stays as-is.
+        }
+
+        searchedDirectories = directories.Count > 0
+            ? string.Join("；", directories)
+            : "（未找到任何模板目录：UGII_TEMPLATE_DIR 未定义且 UGII_BASE_DIR 不可用）";
+
+        var preferred = new[] { "model-plain-1-mm-template.prt", "model-plain-mm-template.prt" };
+        foreach (var dir in directories)
+        {
+            foreach (var name in preferred)
+            {
+                var candidate = Path.Combine(dir, name);
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+            // Fallback: any *-mm-template.prt under the directory whose name
+            // marks millimeters (never guessing units from arbitrary names).
+            var mmCandidates = Directory.GetFiles(dir, "*-mm-template.prt");
+            if (mmCandidates.Length > 0)
+                return mmCandidates[0];
+        }
+        throw new SelfCheckException(
+            "未找到可用的毫米建模模板。" +
+            $"已搜索目录：{searchedDirectories}。" +
+            "请确认 NX2512 安装完整（UGII/templates 下应存在 model-plain-*-mm-template.prt）。");
+    }
+
+    /// <summary>Creates an unsaved millimeter part from a discovered,
+    /// existence-verified template. NewFileName is a %TEMP% path so NX never
+    /// touches a user file; the part is closed without saving afterwards.</summary>
     private static Part CreateTempPart(Session session)
     {
+        var templatePath = DiscoverMillimeterTemplate(out string searchedDirectories);
+        PhaseLog.Write("selfcheck.setup", $"template: {templatePath}（搜索过：{searchedDirectories}）");
+
         var fileNew = session.Parts.FileNew();
-        fileNew.TemplateFileName = "_blank_mm.prt";
+        fileNew.TemplateFileName = templatePath;
         fileNew.TemplateType = FileNewTemplateType.Generic;
         fileNew.Units = Part.Units.Millimeters;
         fileNew.NewFileName = Path.Combine(

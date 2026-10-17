@@ -311,3 +311,12 @@
 - **测试**：新增 ModelingPlanTests 14 项（场景 A/B 计划结构+torus 解析包络钉死 (-50,-50,-5)–(50,50,5)、未知工具/非法参数/超步数/空计划拒绝、别名归一化、确认/自主授权、取消、部分完成真话、引用提取）。开发中修复 2 个协调器缺陷（plan 级通知条件反逻辑、sketch_ref→sketchRef 键映射）。全量 **370 项 = 369 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `e918b21d…`、UI `fe0a3863…`、NxHost `e93ebaa6…`、Entry `a3fed257…`；NX 未运行）。
 - **遗留**：**NX2512 实机验收为完成前提**——①聊天窗体点"几何自检"跑全场景核对报告；②自主模式一句话执行场景 A/B（含圆环体确认 torus 而非同包围盒圆柱）；③确认模式分步确认；④失败/取消路径。FileNew 空模板名 `_blank_mm.prt` 是否匹配本机安装需实机确认（失败会体现在 selfcheck.setup 报告中）。圆环体积/特征类型 API（AskMassProps3d 布局）仍未核实，形状验证为包围盒+实机确认两级。
+
+## 2026-10-17 · Phase 8.1 修复自检临时部件模板失败（离线验证通过；实机复验待执行）
+
+- **故障**：实机点击"几何自检"第一步骤即失败——`selfcheck.setup: NXException: 选定的模板不存在`。根因：8.0 硬编码了 `_blank_mm.prt`（编造的模板名，本机不存在）。
+- **核实**：本机 NX2512 模板目录 `UGII\templates` 下存在 `model-plain-1-mm-template.prt`（毫米建模模板）等真实模板；FileNew 属性语义经 NXOpen.xml 核实（TemplateFileName/NewFileName/Units/MakeDisplayedPart）；Session.GetEnvironmentVariableValue(string) 已核实存在。
+- **修复**（仅 NxGeometrySelfCheck.cs）：新增 `DiscoverMillimeterTemplate` 模板发现——目录候选（UGII_TEMPLATE_DIR 环境变量 → Session 的 UGII_BASE_DIR\UGII\templates）、候选验证（File.Exists）、优先级（model-plain-*-mm 前两名 → 任意 *-mm-template.prt 兜底，不凭名称猜单位——按文件名 -mm- 标记）、失败时 SelfCheckException 报告已搜索目录与解决条件（绝不静默改用用户部件）；CreateTempPart 使用发现的**绝对路径**模板并在 PhaseLog 记录（template 行含搜索目录）。
+- **测试**：新增 SelfCheckTemplateDiscoveryTests 3 项（优先级排序、兜底、空目录不静默回退）。全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `699a61aa…`、UI `a0ef6a58…`、NxHost `a5851fe5…`、Entry `a3fed257…`；NX 未运行）。
+- **遗留**：实机复验——点击"几何自检"应创建临时部件并完成四场景；若 setup 仍失败，报告将给出实际模板目录与候选（不再是无诊断的"模板不存在"）。隔离/清理/恢复逻辑未改动。
