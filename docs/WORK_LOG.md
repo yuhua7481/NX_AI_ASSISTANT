@@ -329,3 +329,12 @@
 - **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `72e12c11…`、UI `bbb91128…`、NxHost `2f8e6d30…`、Entry `a3fed257…`；NX 未运行）。
 - **遗留**：实机复验自检按钮。若两候选都失败，诊断将包含两条尝试的精确异常——按证据决定下一步（如检查注册表应用名大小写/使用 udm 变体注册表）。
+
+## 2026-10-17 · Phase 8.1.2 FileNew 完整属性契约修复（离线验证通过；实机复验待执行）
+
+- **再取证**：8.1.1 双候选（注册文件名/绝对路径）均失败且异常相同——问题不在模板名解析，在 FileNew 属性集不完整。
+- **根因核实**：本机安装的 NX 官方测试 journal（`AUTOMATED_TESTING/examples/UnitTest/Python/BlockStyler/ExtrudewithPreview/ATS_UnitTest_ExtrudewithPreview.py`）记录了 File→New（mm 模型模板）的**完整属性全集**——`ApplicationName="ModelTemplate"`（非调色板显示名"Model"！）、`TemplateType=Item`（非 Generic）、`TemplatePresentationName="Model"`、`UseBlankTemplate=False`、`RelationType=""`、`UsesMasterModel="No"`、`ItemType=""`、`Specialization=""`、`SetCanCreateAltrep(False)`、`MasterFileName=""`、`DisplayPartOption=AllowAdditional`——缺任何一项都会让 NX 以误导性的"选定的模板不存在"失败。
+- **修复**（仅 NxGeometrySelfCheck.CreateTempPart）：按官方 journal 属性全集完整设置（TemplateFileName 仍用发现的注册文件名，绝对路径丢弃）；异常包装 SelfCheckException 并注明契约来源。
+- **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `d1481a56…`、UI `01121f36…`、NxHost `f7119b33…`、Entry `a3fed257…`；NX 未运行）。
+- **遗留**：实机复验自检按钮——官方 journal 属性全集是 NX 自身记录的 working 用法，预期成功；若仍失败，PhaseLog 会给出精确异常。

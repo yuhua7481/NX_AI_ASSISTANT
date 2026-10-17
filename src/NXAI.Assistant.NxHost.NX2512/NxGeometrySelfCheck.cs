@@ -173,19 +173,20 @@ public sealed class NxGeometrySelfCheck
             "请确认 NX2512 安装完整（UGII/templates 下应存在 model-plain-*-mm-template.prt）。");
     }
 
-    /// <summary>Creates an unsaved millimeter part from a discovered,
-    /// existence-verified template. NewFileName is a %TEMP% path so NX never
-    /// touches a user file; the part is closed without saving afterwards.
+    /// <summary>Creates an unsaved millimeter part from the discovered mm
+    /// model template. NewFileName is a %TEMP% path so NX never touches a
+    /// user file; the part is closed without saving afterwards.
     ///
-    /// Phase 8.1.1: FileNew resolves TemplateFileName against the template
-    /// REGISTRY (.pax palettes keyed by application, e.g. ugs_model_templates.pax
-    /// where the mm model template is registered as Presentation name "Model"
-    /// / Filename model-plain-1-mm-template.prt / Units Metric — verified in
-    /// the install). A raw absolute path is NOT what the resolver looks up,
-    /// which is why the previous attempt still failed with "选定的模板不存在"
-    /// even with a valid path in PhaseLog. Strategy: set ApplicationName to
-    /// the palette's application and try the registry FILENAME first, then
-    /// the absolute path; every attempt is logged with its exact exception.
+    /// Phase 8.1.2: the property set below mirrors NX's OWN journal recording
+    /// of File→New with the mm model template (verified against the shipped
+    /// AUTOMATED_TESTING journal in the install): TemplateFileName must be
+    /// the registry FILENAME, ApplicationName must be "ModelTemplate"
+    /// (NOT the palette presentation name "Model" — that goes to
+    /// TemplatePresentationName), TemplateType must be Item (not Generic),
+    /// and UseBlankTemplate/RelationType/UsesMasterModel/ItemType/
+    /// Specialization/MasterFileName/SetCanCreateAltrep/DisplayPartOption
+    /// must all be set explicitly. Omitting any of them makes NX fail the
+    /// lookup with the misleading "选定的模板不存在".
     /// </summary>
     private static Part CreateTempPart(Session session)
     {
@@ -194,61 +195,52 @@ public sealed class NxGeometrySelfCheck
         PhaseLog.Write("selfcheck.setup",
             $"template discovered: {templatePath}（搜索过：{searchedDirectories}）");
 
-        // Candidate 1: registry filename + Model application — how the
-        // .pax palette registers this template.
-        // Candidate 2: absolute path (kept as fallback; some flows accept it).
-        var candidates = new (string Label, string TemplateFileName, string? ApplicationName)[]
+        FileNew? fileNew = null;
+        try
         {
-            ("registry-filename", templateFileName, "Model"),
-            ("absolute-path", templatePath, null),
-        };
+            fileNew = session.Parts.FileNew();
+            fileNew.TemplateFileName = templateFileName;
+            fileNew.UseBlankTemplate = false;
+            fileNew.ApplicationName = "ModelTemplate";
+            fileNew.Units = Part.Units.Millimeters;
+            fileNew.RelationType = "";
+            fileNew.UsesMasterModel = "No";
+            fileNew.TemplateType = FileNewTemplateType.Item;
+            fileNew.TemplatePresentationName = "Model";
+            fileNew.ItemType = "";
+            fileNew.Specialization = "";
+            fileNew.SetCanCreateAltrep(false);
+            fileNew.NewFileName = Path.Combine(
+                Path.GetTempPath(),
+                $"nxai_selfcheck_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..8]}.prt");
+            fileNew.MasterFileName = "";
+            fileNew.MakeDisplayedPart = true;
+            fileNew.DisplayPartOption = DisplayPartOption.AllowAdditional;
 
-        var attempts = new List<string>();
-        foreach (var (label, templateName, applicationName) in candidates)
-        {
-            FileNew? fileNew = null;
-            try
-            {
-                fileNew = session.Parts.FileNew();
-                fileNew.TemplateFileName = templateName;
-                fileNew.TemplateType = FileNewTemplateType.Generic;
-                if (applicationName != null)
-                    fileNew.ApplicationName = applicationName;
-                fileNew.Units = Part.Units.Millimeters;
-                fileNew.NewFileName = Path.Combine(
-                    Path.GetTempPath(),
-                    $"nxai_selfcheck_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..8]}.prt");
-                fileNew.MakeDisplayedPart = true;
-
-                var committed = fileNew.Commit() as Part;
-                if (committed == null)
-                {
-                    attempts.Add($"{label}: Commit 未返回部件");
-                    continue;
-                }
-                fileNew.Destroy();
-                fileNew = null;
-                if (committed.PartUnits != BasePart.Units.Millimeters)
-                    throw new SelfCheckException($"临时部件单位是 {committed.PartUnits}，预期毫米。");
-                PhaseLog.Write("selfcheck.setup", $"temp part created via {label}: {committed.Name}");
-                return committed;
-            }
-            catch (Exception ex)
-            {
-                attempts.Add($"{label}: {ex.GetType().Name}: {ex.Message}");
-                PhaseLog.Write("selfcheck.setup", $"attempt {label} FAILED: {ex.GetType().Name}: {ex.Message}");
-            }
-            finally
-            {
-                fileNew?.Destroy();
-            }
+            var committed = fileNew.Commit() as Part
+                ?? throw new SelfCheckException("FileNew.Commit 未返回新部件。");
+            fileNew.Destroy();
+            fileNew = null;
+            if (committed.PartUnits != BasePart.Units.Millimeters)
+                throw new SelfCheckException($"临时部件单位是 {committed.PartUnits}，预期毫米。");
+            PhaseLog.Write("selfcheck.setup", $"temp part created: {committed.Name}");
+            return committed;
         }
-
-        throw new SelfCheckException(
-            "无法创建临时测试部件（模板解析失败）。" +
-            $"模板文件（已确认存在）：{templatePath}。" +
-            $"尝试记录：{string.Join("；", attempts)}。" +
-            "请检查 NX 模板注册表（UGII/templates/*.pax）是否完整。");
+        catch (SelfCheckException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new SelfCheckException(
+                $"无法创建临时测试部件：{ex.GetType().Name}: {ex.Message}。" +
+                $"模板（已确认存在）：{templatePath}。" +
+                "调用契约已按 NX 官方 journal（AUTOMATED_TESTING）记录的属性全集设置。", ex);
+        }
+        finally
+        {
+            fileNew?.Destroy();
+        }
     }
 
     // ------------------------------------------------------------ case A
