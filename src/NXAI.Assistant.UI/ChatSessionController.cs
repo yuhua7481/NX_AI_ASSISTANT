@@ -47,11 +47,21 @@ public sealed class ChatSessionController : IDisposable
     public const int DefaultMaxOutboundMessages = 20;
 
     /// <summary>
-    /// Model responses allowed per user turn: response 1 may request a tool
-    /// call (which is confirmed and executed at most once), response 2 is the
-    /// final text reply and may not trigger execution.
+    /// Model responses allowed per user turn. Phase 7.3.2: the cap now
+    /// covers a limited serial chain — response 1 may request a tool call
+    /// (e.g. create_sketch), response 2 another single tool call fed the
+    /// first tool's real result (e.g. create_extrude with the controlled
+    /// sketch reference), response 3 is the final text reply and may not
+    /// trigger execution. Every round still executes at most ONE tool,
+    /// strictly serially (each awaits the previous tool's real result),
+    /// through the same registry/parser/authorization path. The cap keeps
+    /// the chain finite — a longer workflow requires another user turn.
     /// </summary>
-    public const int MaxModelResponsesPerTurn = 2;
+    public const int MaxModelResponsesPerTurn = 3;
+
+    /// <summary>Modeling executions allowed per user turn (the serial chain
+    /// length). Round gating guarantees at most this many executor calls.</summary>
+    public const int MaxToolExecutionsPerTurn = MaxModelResponsesPerTurn - 1;
 
     private readonly ModelService _modelService;
     private readonly ChatLog _chatLog;
@@ -265,10 +275,11 @@ public sealed class ChatSessionController : IDisposable
         {
             for (int round = 1; round <= MaxModelResponsesPerTurn; round++)
             {
-                // Tools are advertised only in round 1: the final round exists to
-                // let the model phrase the result, not to trigger more modeling.
+                // Tools are advertised while the chain still has execution
+                // budget; the final round exists to let the model phrase the
+                // accumulated results, not to trigger more modeling.
                 IReadOnlyList<ToolDefinition>? tools =
-                    round == 1 && ToolsEnabled ? _toolRegistry.All : null;
+                    round < MaxModelResponsesPerTurn && ToolsEnabled ? _toolRegistry.All : null;
 
                 var result = await _requestSender(protocol, tools, cancellationToken);
 

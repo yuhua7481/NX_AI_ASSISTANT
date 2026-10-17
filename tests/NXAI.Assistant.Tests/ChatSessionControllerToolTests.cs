@@ -381,24 +381,27 @@ public class ChatSessionControllerToolTests
     public async Task Final_round_tool_call_is_refused_and_not_executed()
     {
         var (controller, sender, log, executor, gate) = Create();
-        // Response 1: tool call. Response 2: tool call again (model misbehaving).
+        // Phase 7.3.2 contract: rounds 1-2 may each execute one tool (serial
+        // chain); round 3 (final) must refuse a tool call and not execute.
         sender.Enqueue(ScriptedSender.ToolCall(id: "call_1"),
-            ScriptedSender.ToolCall(id: "call_2"));
-        // The user never confirms the first call either.
+            ScriptedSender.ToolCall(id: "call_2"),
+            ScriptedSender.ToolCall(id: "call_3"));
         gate.EnqueuePending(out var pending);
 
         controller.StartSend("创建长方体");
         await UntilAsync(() => gate.Requests.Count > 0);
         pending.TrySetResult(new ToolConfirmationDecision(true, "D:/part.prt"));
+        // Rounds 2 and 3: the default gate handler auto-confirms; count cards.
         await WaitForCompletedAsync(controller);
 
-        Assert.Equal(2, sender.RequestCount);      // capped
-        Assert.Equal(1, executor.CallCount);       // first call confirmed and executed
-        Assert.Single(gate.Requests);              // the refused second call never reached confirmation
+        Assert.Equal(ChatSessionController.MaxModelResponsesPerTurn, sender.RequestCount); // capped at 3
+        Assert.Equal(ChatSessionController.MaxToolExecutionsPerTurn, executor.CallCount);  // 2 serial executions
+        Assert.Equal(ChatSessionController.MaxToolExecutionsPerTurn, gate.Requests.Count); // round-3 call refused before confirmation
 
         // Final round does not advertise tools.
         Assert.NotNull(sender.ToolDeclarations[0]);
-        Assert.Null(sender.ToolDeclarations[1]);
+        Assert.NotNull(sender.ToolDeclarations[1]);
+        Assert.Null(sender.ToolDeclarations[^1]);
 
         var last = log.Messages[^1];
         Assert.Equal(ChatRole.Error, last.Role);
@@ -418,10 +421,10 @@ public class ChatSessionControllerToolTests
         await WaitForCompletedAsync(controller);
 
         Assert.Equal(ChatSessionController.MaxModelResponsesPerTurn, sender.RequestCount);
-        // The user confirmed round 1's call (executed once); the round-2 tool
-        // call is refused by the cap and must not reach confirmation/execution.
-        Assert.Equal(1, executor.CallCount);
-        Assert.Single(gate.Requests);
+        // Rounds 1-2 confirmed+executed (serial chain); the round-3 tool call
+        // is refused by the cap and must not reach confirmation/execution.
+        Assert.Equal(ChatSessionController.MaxToolExecutionsPerTurn, executor.CallCount);
+        Assert.Equal(ChatSessionController.MaxToolExecutionsPerTurn, gate.Requests.Count);
     }
 
     // ------------------------------------------------- cancel/detach safety
@@ -591,12 +594,15 @@ public class ChatSessionControllerToolTests
     [Fact]
     public async Task Mixed_tool_calls_never_execute_two_tools_in_one_turn()
     {
-        // Round 1: cylinder call (confirmed, executed). Round 2 (final): block
-        // call — must be refused by the round cap, never confirmed/executed.
+        // Phase 7.3.2: two serial tools per turn are now allowed; the THIRD
+        // response must be final text. A model misbehaving by calling a tool
+        // in the final round is refused by the cap — never confirmed/executed.
         var (controller, sender, log, executor, gate) = Create();
         sender.Enqueue(
             ScriptedSender.ToolCall(name: "create_cylinder", args: CylinderCallJson),
-            ScriptedSender.ToolCall(id: "call_2", name: "create_block"));
+            ScriptedSender.ToolCall(id: "call_2", name: "create_block"),
+            ScriptedSender.ToolCall(id: "call_3", name: "create_sphere",
+                args: """{"diameter":10,"unit":"mm"}"""));
         gate.EnqueuePending(out var pending);
 
         controller.StartSend("先圆柱后长方体");
@@ -604,10 +610,10 @@ public class ChatSessionControllerToolTests
         pending.TrySetResult(new ToolConfirmationDecision(true, "D:/part.prt"));
         await WaitForCompletedAsync(controller);
 
-        Assert.Equal(1, executor.CallCount);                     // only the cylinder
-        Assert.Equal("create_cylinder", executor.LastToolName);
-        Assert.Equal(2, sender.RequestCount);                    // capped
-        Assert.Single(gate.Requests);                            // round-2 call never reached confirmation
+        Assert.Equal(ChatSessionController.MaxToolExecutionsPerTurn, executor.CallCount); // cylinder + block
+        Assert.Equal("create_block", executor.LastToolName);
+        Assert.Equal(ChatSessionController.MaxModelResponsesPerTurn, sender.RequestCount);
+        Assert.Equal(ChatSessionController.MaxToolExecutionsPerTurn, gate.Requests.Count); // 3rd call never reached confirmation
         Assert.Equal(ChatRole.Error, log.Messages[^1].Role);
     }
 

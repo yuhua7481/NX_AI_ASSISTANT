@@ -70,3 +70,22 @@ NX 未运行，4 DLL 部署 SHA-256 与构建产物逐一一致：Core `22e6fe97
 **部署**：Core.dll SHA-256 `91780fdf…` 与构建产物一致。
 
 **实机验收（待执行）**：重启插件加载新 DLL → 自主模式对既有 SKETCH_000 请求 +Z 拉伸 50mm → 聊天无原始标签、PhaseLog 显示进入 create_extrude → 包围盒 30×30×50 → 确认模式复测确认卡。注意：**若模型继续用 `profile` 字段名，调用会被类型化解析器拒绝（未知字段）**——如复现，需按截图原始输出决定是否将 `profile` 列入已核实别名（当前无证据表明应静默改写参数名，不猜）。
+
+---
+
+## Phase 7.3.2（2026-10-17）：参数别名 + 串行两步链 + 回合上限扩展
+
+**实机补充证据**：模型稳定输出 `extrude / sketch=SKETCH_000 / distance=50 / unit=mm`（无 direction）——7.3.1 解析了 `extrude` 别名，但 `sketch` 参数名不在 schema（typed parser 按未知字段拒绝），且回合上限 2 使 `create_sketch → create_extrude` 串行链无法在单轮完成。
+
+**修复**：
+
+1. **参数名别名**（ToolTagProtocol 封闭表，仅 create_extrude）：`sketch` → `sketch_ref`。一对一映射；同一调用同时携带 `sketch` 与 `sketch_ref` → 冲突拒绝；不做参数名猜测。`profile`（7.3.1 观察到）**未准入**——本批截图证据是 `sketch`，两者并存无据，继续由类型化解析器按未知字段拒绝。
+2. **direction 默认值核实**：产品契约本就允许默认——schema required 仅 sketch_ref/distance/unit，解析器 direction 缺省即 `Normal`（沿草图法向）。无改动，补测试锁定契约。
+3. **串行链路**（ChatSessionController）：`MaxModelResponsesPerTurn` 2→3，新增 `MaxToolExecutionsPerTurn = 2`。rounds 1-2 每轮至多一个工具调用、严格串行（各自等待前一工具真实结果），工具结果照常回填（sketchRef 由模型从回填 payload 读取）；round 3 仅最终文本、不广告工具。第一工具失败不阻止第二工具的独立校验，但每个调用仍走全部注册/Schema/授权/线程/回滚检查。两工具均在自主允许清单（Phase 7 已列）。
+4. **泄漏阻断不变**：7.3 的"协议错误不渲染原文"路径覆盖全部新拒绝分支（参数冲突等）。
+
+**测试**：新增 ToolTagCompatAndChainTests 8 项（live 样例含 sketch 别名直达真实解析器、direction 缺省契约锁定、别名冲突拒绝、串行链 sketch→extrude 传递真实受控引用、确认模式每步各一张卡、自主模式零卡片、首步失败次步独立校验、上限防循环）；更新 3 个 round-cap 旧契约测试至新两步契约。全量 **352 项 = 351 通过 / 0 失败 / 1 跳过**。
+
+**部署**：4 DLL SHA-256 一致（Core `8767fbe5…`、UI `08376a86…`、NxHost `68d4ce4e…`、Entry `baf508fc…`）。
+
+**实机验收（待执行）**：自主模式一句"用拉伸命令绘制直径30、高50的圆柱"→ 圆形草图成功 → 串行 create_extrude（sketch_ref=SKETCH_000，d=50 默认法向）→ 无原始标签、PhaseLog 两步执行阶段齐全 → 包围盒 30×30×50 → 确认模式复测每步确认卡 → 取消/失败路径不重复执行、不自动保存。

@@ -278,3 +278,11 @@
 - **测试**：新增 ToolTagAliasTests 8 项（截图样例归一化、别名+方向直达真实类型化解析器、非法方向拒绝、受控引用不变、未知别名不重写、其他工具不受影响、结构化 id 保留）。修正 7.3 测试的 id 前缀断言（tagcall_N 计数器两位数时 [^1] 截断错误→StartsWith）。全量 **344 项 = 343 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：Core.dll SHA-256 `91780fdf…` 一致（NX 未运行）。
 - **遗留**：实机验收 7 项；**若模型继续用 profile 参数名，类型化解析器将拒绝（未知字段）——复现时按截图证据决定是否准入参数名别名，当前不猜**。待推送提交：b9bf600、4ca020e、本轮新提交。
+
+## 2026-10-17 · Phase 7.3.2 参数别名 + 串行两步链 + 回合上限扩展（离线验证通过；实机验收待执行）
+
+- **补充证据**：模型稳定输出 `extrude / sketch=SKETCH_000 / distance=50 / unit=mm`（无 direction）——7.3.1 后 `sketch` 参数名仍被类型化解析器按未知字段拒绝；回合上限 2 使两步串行链无法单轮完成。
+- **修复**：① ToolTagProtocol 参数名别名封闭表（仅 create_extrude：sketch→sketch_ref；别名与规范名并存→冲突拒绝；profile 仍未准入——本批证据是 sketch）；② direction 缺省=Normal 为既有产品契约（schema required 仅 sketch_ref/distance/unit），补测试锁定；③ ChatSessionController 回合上限 2→3（MaxToolExecutionsPerTurn=2），rounds 1-2 每轮至多一工具严格串行、结果回填、round 3 纯文本；两工具均在允许清单；泄漏阻断路径不变。
+- **测试**：新增 ToolTagCompatAndChainTests 8 项 + 更新 3 个 round-cap 旧契约测试。全量 **352 项 = 351 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `8767fbe5…`、UI `08376a86…`、NxHost `68d4ce4e…`、Entry `baf508fc…`；NX 未运行）。
+- **遗留**：实机验收（自主模式一句话两步建模、确认模式逐步确认、取消/失败路径）；profile 参数名如再次出现按截图证据决定。

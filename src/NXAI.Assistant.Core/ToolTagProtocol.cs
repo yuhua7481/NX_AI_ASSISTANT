@@ -196,10 +196,13 @@ internal static partial class ToolTagProtocol
 
         // Convert to a JSON object string so the typed parsers downstream
         // see the same shape as a structured tool call's arguments. Tool
-        // aliases and known enum-value spellings are normalized here, at
-        // this single explicit point — registry, schema and authorization
-        // checks stay downstream, unchanged.
-        var (canonicalName, normalized) = NormalizeArguments(functionName, parameters);
+        // aliases, parameter-name aliases and known enum-value spellings
+        // are normalized here, at this single explicit point — registry,
+        // schema and authorization checks stay downstream, unchanged.
+        var (canonicalName, normalized, normalizeError) =
+            NormalizeArguments(functionName, parameters);
+        if (normalizeError != null)
+            return (null, null, normalizeError);
 
         var json = new StringBuilder("{");
         bool first = true;
@@ -247,13 +250,35 @@ internal static partial class ToolTagProtocol
             ["positive_z"] = "normal",
         };
 
-    private static (string CanonicalName, List<KeyValuePair<string, string>> Arguments) NormalizeArguments(
+    /// <summary>
+    /// Explicit parameter-name aliases per canonical tool, admitted only
+    /// after checking the registered tool's schema. One alias maps to
+    /// exactly one schema field; conflicting aliases for the same field
+    /// within one call are rejected downstream as duplicate keys after
+    /// normalization. Never a fuzzy or positional rewrite.
+    /// </summary>
+    private static readonly Dictionary<string, Dictionary<string, string>> ParameterAliases =
+        new(StringComparer.Ordinal)
+        {
+            // Live model output (Phase 7.3.2) sends the sketch reference as
+            // "sketch" — the create_extrude schema field is "sketch_ref".
+            [CreateExtrudeTool.Name] = new(StringComparer.Ordinal)
+            {
+                ["sketch"] = "sketch_ref",
+            },
+        };
+
+    private static (string CanonicalName, List<KeyValuePair<string, string>> Arguments, string? Error) NormalizeArguments(
         string functionName,
         Dictionary<string, string> parameters)
     {
         var canonical = ToolAliases.TryGetValue(functionName, out var mapped)
             ? mapped
             : functionName;
+
+        var paramAliases = ParameterAliases.TryGetValue(canonical, out var table)
+            ? table
+            : null;
 
         var result = new List<KeyValuePair<string, string>>(parameters.Count);
         foreach (var (key, value) in parameters)
@@ -265,8 +290,21 @@ internal static partial class ToolTagProtocol
                 result.Add(new(key, direction));
                 continue;
             }
-            result.Add(new(key, value));
+
+            var normalizedKey = key;
+            if (paramAliases != null && paramAliases.TryGetValue(key, out var schemaKey))
+            {
+                // One alias → one schema field. If the call ALSO carries the
+                // canonical name, do not silently pick one — reject.
+                if (parameters.ContainsKey(schemaKey))
+                {
+                    return (canonical, result,
+                        $"模型返回了无法识别的工具调用格式（参数 {key} 与 {schemaKey} 冲突），未执行建模操作。");
+                }
+                normalizedKey = schemaKey;
+            }
+            result.Add(new(normalizedKey, value));
         }
-        return (canonical, result);
+        return (canonical, result, null);
     }
 }
