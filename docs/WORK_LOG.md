@@ -338,3 +338,12 @@
 - **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `d1481a56…`、UI `01121f36…`、NxHost `f7119b33…`、Entry `a3fed257…`；NX 未运行）。
 - **遗留**：实机复验自检按钮——官方 journal 属性全集是 NX 自身记录的 working 用法，预期成功；若仍失败，PhaseLog 会给出精确异常。
+
+## 2026-10-17 · Phase 8.1.3 GetMatchingTemplates 查询 NX 认可模板（离线验证通过；实机复验待执行）
+
+- **再取证**：8.1.2 官方 journal 属性全集仍失败且异常相同——属性集排除后，唯一剩余解释是 **TemplateFileName 期望的名字与磁盘文件名/注册文件名都不同**（本机 NX 会话实际注册的模板名未知）。
+- **正解（API 核实）**：`FileNew.GetMatchingTemplates(FileNewApplication, Part.Units)`（NX2312+，本机元数据核实）返回 NX 自己注册的模板列表；`FileNewTemplate.GetName()` 即 TemplateFileName 期望的名字。**向 NX 问它认得的模板，而不是向文件系统猜。**
+- **修复**（仅 NxGeometrySelfCheck.CreateTempPart）：FileNew 创建后先 `GetMatchingTemplates(Modeling, Millimeters)` 枚举（空表→SelfCheckException 指向 customer defaults 模板目录配置；每个模板名记 PhaseLog）；取第一个的 GetName() 设回 TemplateFileName（官方 journal 属性全集保持）；磁盘模板发现降级为交叉诊断信息。
+- **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `7c8357d3…`、UI `2235deb2…`、NxHost `e9274a37…`、Entry `a3fed257…`；NX 未运行）。
+- **遗留**：实机复验——PhaseLog 将列出 NX 认可的全部模板名；若查询返回空表，诊断指向 customer defaults 模板配置（环境问题，按报告解决）。

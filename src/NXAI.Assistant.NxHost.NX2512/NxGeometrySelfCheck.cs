@@ -173,33 +173,87 @@ public sealed class NxGeometrySelfCheck
             "请确认 NX2512 安装完整（UGII/templates 下应存在 model-plain-*-mm-template.prt）。");
     }
 
-    /// <summary>Creates an unsaved millimeter part from the discovered mm
-    /// model template. NewFileName is a %TEMP% path so NX never touches a
-    /// user file; the part is closed without saving afterwards.
+    /// <summary>Creates an unsaved millimeter part using a template that NX
+    /// ITSELF lists as available. NewFileName is a %TEMP% path so NX never
+    /// touches a user file; the part is closed without saving afterwards.
     ///
-    /// Phase 8.1.2: the property set below mirrors NX's OWN journal recording
-    /// of File→New with the mm model template (verified against the shipped
-    /// AUTOMATED_TESTING journal in the install): TemplateFileName must be
-    /// the registry FILENAME, ApplicationName must be "ModelTemplate"
-    /// (NOT the palette presentation name "Model" — that goes to
-    /// TemplatePresentationName), TemplateType must be Item (not Generic),
-    /// and UseBlankTemplate/RelationType/UsesMasterModel/ItemType/
-    /// Specialization/MasterFileName/SetCanCreateAltrep/DisplayPartOption
-    /// must all be set explicitly. Omitting any of them makes NX fail the
-    /// lookup with the misleading "选定的模板不存在".
+    /// Phase 8.1.3: after three failed attempts (hardcoded name, registry
+    /// filename, absolute path, all with the journal property set), the
+    /// resolver question is settled the authoritative way — ask NX which
+    /// templates IT knows:
+    ///   fileNew.GetMatchingTemplates(FileNewApplication.Modeling,
+    ///       Part.Units.Millimeters)   (verified, Created in NX2312)
+    /// returns FileNewTemplate objects whose GetName() is exactly the name
+    /// TemplateFileName expects. The template FILE on disk (the previous
+    /// attempts' target) is irrelevant to that lookup — which explains why
+    /// "选定的模板不存在" persisted for existing files. The mm template file
+    /// discovery is kept only as a cross-check/diagnostic.
     /// </summary>
     private static Part CreateTempPart(Session session)
     {
+        // Cross-check only: the on-disk mm template (diagnostic context).
         var templatePath = DiscoverMillimeterTemplate(out string searchedDirectories);
-        var templateFileName = Path.GetFileName(templatePath);
         PhaseLog.Write("selfcheck.setup",
-            $"template discovered: {templatePath}（搜索过：{searchedDirectories}）");
+            $"on-disk mm template (cross-check): {templatePath}（搜索过：{searchedDirectories}）");
 
         FileNew? fileNew = null;
         try
         {
             fileNew = session.Parts.FileNew();
-            fileNew.TemplateFileName = templateFileName;
+
+            // Ask NX which Modeling/mm templates it actually knows.
+            FileNewTemplate[] matching;
+            try
+            {
+                // The enum is deprecated in favor of string application names,
+                // but GetMatchingTemplates still consumes it (NX2312+).
+#pragma warning disable CS0618
+                matching = fileNew.GetMatchingTemplates(
+                    FileNewApplication.Modeling, Part.Units.Millimeters);
+#pragma warning restore CS0618
+            }
+            catch (Exception ex)
+            {
+                throw new SelfCheckException(
+                    $"查询 NX 模板注册表失败：{ex.GetType().Name}: {ex.Message}。" +
+                    "请确认本机 NX 模板配置（customer defaults / UGII_TEMPLATE_DIR）完整。", ex);
+            }
+            if (matching.Length == 0)
+            {
+                throw new SelfCheckException(
+                    "NX 模板注册表中没有任何 Modeling/毫米模板（GetMatchingTemplates 返回空）。" +
+                    "请检查 NX 安装的模板配置（customer defaults 中的模板目录设置）。");
+            }
+            foreach (var t in matching)
+            {
+                string templateName = "";
+                try
+                {
+                    templateName = t.GetName();
+                }
+                catch
+                {
+                    templateName = "（GetName 失败）";
+                }
+                PhaseLog.Write("selfcheck.setup", $"nx template: {templateName}");
+            }
+
+            var chosen = matching[0];
+            string chosenName;
+            try
+            {
+                chosenName = chosen.GetName();
+            }
+            catch (Exception ex)
+            {
+                throw new SelfCheckException(
+                    $"读取 NX 模板名称失败：{ex.GetType().Name}: {ex.Message}", ex);
+            }
+            PhaseLog.Write("selfcheck.setup", $"chosen template (NX-registered): {chosenName}");
+
+            // The full attribute contract from NX's own journal (Phase 8.1.2),
+            // now with the NX-registered template name.
+            fileNew.TemplateFileName = chosenName;
             fileNew.UseBlankTemplate = false;
             fileNew.ApplicationName = "ModelTemplate";
             fileNew.Units = Part.Units.Millimeters;
@@ -217,14 +271,14 @@ public sealed class NxGeometrySelfCheck
             fileNew.MakeDisplayedPart = true;
             fileNew.DisplayPartOption = DisplayPartOption.AllowAdditional;
 
-            var committed = fileNew.Commit() as Part
+            var created = fileNew.Commit() as Part
                 ?? throw new SelfCheckException("FileNew.Commit 未返回新部件。");
             fileNew.Destroy();
             fileNew = null;
-            if (committed.PartUnits != BasePart.Units.Millimeters)
-                throw new SelfCheckException($"临时部件单位是 {committed.PartUnits}，预期毫米。");
-            PhaseLog.Write("selfcheck.setup", $"temp part created: {committed.Name}");
-            return committed;
+            if (created.PartUnits != BasePart.Units.Millimeters)
+                throw new SelfCheckException($"临时部件单位是 {created.PartUnits}，预期毫米。");
+            PhaseLog.Write("selfcheck.setup", $"temp part created: {created.Name}");
+            return created;
         }
         catch (SelfCheckException)
         {
@@ -234,8 +288,7 @@ public sealed class NxGeometrySelfCheck
         {
             throw new SelfCheckException(
                 $"无法创建临时测试部件：{ex.GetType().Name}: {ex.Message}。" +
-                $"模板（已确认存在）：{templatePath}。" +
-                "调用契约已按 NX 官方 journal（AUTOMATED_TESTING）记录的属性全集设置。", ex);
+                "（已改为向 NX 查询其模板注册表；异常含查询/提交的精确阶段。）", ex);
         }
         finally
         {
