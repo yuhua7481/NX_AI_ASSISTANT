@@ -247,40 +247,92 @@ public sealed class NxGeometrySelfCheck
             foreach (var t in availableTemplates)
                 PhaseLog.Write("selfcheck.setup", $"nx template: {t}");
 
-            // 4. Prefer an explicit millimeter template by file convention.
-            var chosenName = availableTemplates.FirstOrDefault(t =>
-                t.Contains("-mm-", StringComparison.OrdinalIgnoreCase) ||
-                t.EndsWith("-mm.prt", StringComparison.OrdinalIgnoreCase))
-                ?? availableTemplates[0];
-            PhaseLog.Write("selfcheck.setup", $"chosen template (NX-registered): {chosenName}");
+            // 4. Candidate selection, ordered by live evidence:
+            //    a) model-plain-1-mm-template.prt — NX lists it AND it exists
+            //       on disk (double confirmation); the 8.1.2 failure with this
+            //       name was caused by the INCOMPLETE property set, fixed in
+            //       8.1.2/8.1.4, so it is the first candidate again.
+            //    b) any other listed "-mm-" template.
+            //    c) the "空白" (blank) entry NX lists — a blank part uses
+            //       customer defaults instead of a seed part; combined with
+            //       UseBlankTemplate=true it needs no template file at all.
+            var candidates = new List<(string Name, bool Blank)>();
+            var preferred = availableTemplates.FirstOrDefault(t =>
+                t.Equals("model-plain-1-mm-template.prt", StringComparison.OrdinalIgnoreCase));
+            if (preferred != null)
+                candidates.Add((preferred, false));
+            candidates.AddRange(availableTemplates
+                .Where(t => t.Contains("-mm-", StringComparison.OrdinalIgnoreCase) &&
+                            t != preferred)
+                .Select(t => (t, false)));
+            if (availableTemplates.Any(t => t == "空白"))
+                candidates.Add(("空白", true));
+            if (candidates.Count == 0)
+                candidates.Add((availableTemplates[0], false));
 
-            // 5. The full attribute contract from NX's own journal (8.1.2),
-            // now with the NX-listed template name.
-            fileNew.TemplateFileName = chosenName;
-            fileNew.UseBlankTemplate = false;
-            fileNew.Units = Part.Units.Millimeters;
-            fileNew.RelationType = "";
-            fileNew.UsesMasterModel = "No";
-            fileNew.TemplateType = FileNewTemplateType.Item;
-            fileNew.TemplatePresentationName = "Model";
-            fileNew.ItemType = "";
-            fileNew.Specialization = "";
-            fileNew.SetCanCreateAltrep(false);
-            fileNew.NewFileName = Path.Combine(
-                Path.GetTempPath(),
-                $"nxai_selfcheck_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..8]}.prt");
-            fileNew.MasterFileName = "";
-            fileNew.MakeDisplayedPart = true;
-            fileNew.DisplayPartOption = DisplayPartOption.AllowAdditional;
+            // 5. Try each candidate with the full journal attribute contract
+            //    (8.1.2). The blank candidate sets UseBlankTemplate=true and
+            //    skips the seed-part fields. Each attempt gets a FRESH builder
+            //    (a builder is single-use: destroyed after every attempt).
+            var attempts = new List<string>();
+            foreach (var (name, blank) in candidates)
+            {
+                FileNew? attempt = null;
+                try
+                {
+                    attempt = session.Parts.FileNew();
+                    attempt.ApplicationName = modelingApp;
+                    attempt.TemplateFileName = name;
+                    attempt.UseBlankTemplate = blank;
+                    attempt.Units = Part.Units.Millimeters;
+                    attempt.RelationType = "";
+                    attempt.UsesMasterModel = "No";
+                    attempt.TemplateType = FileNewTemplateType.Item;
+                    attempt.TemplatePresentationName = blank ? "" : "Model";
+                    attempt.ItemType = "";
+                    attempt.Specialization = "";
+                    attempt.SetCanCreateAltrep(false);
+                    attempt.NewFileName = Path.Combine(
+                        Path.GetTempPath(),
+                        $"nxai_selfcheck_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..8]}.prt");
+                    attempt.MasterFileName = "";
+                    attempt.MakeDisplayedPart = true;
+                    attempt.DisplayPartOption = DisplayPartOption.AllowAdditional;
 
-            var created = fileNew.Commit() as Part
-                ?? throw new SelfCheckException("FileNew.Commit 未返回新部件。");
-            fileNew.Destroy();
-            fileNew = null;
-            if (created.PartUnits != BasePart.Units.Millimeters)
-                throw new SelfCheckException($"临时部件单位是 {created.PartUnits}，预期毫米。");
-            PhaseLog.Write("selfcheck.setup", $"temp part created: {created.Name}");
-            return created;
+                    var created = attempt.Commit() as Part;
+                    if (created == null)
+                    {
+                        attempts.Add($"{name}: Commit 未返回部件");
+                        continue;
+                    }
+                    attempt.Destroy();
+                    attempt = null;
+                    if (created.PartUnits != BasePart.Units.Millimeters)
+                        throw new SelfCheckException($"临时部件单位是 {created.PartUnits}，预期毫米。");
+                    PhaseLog.Write("selfcheck.setup",
+                        $"temp part created via {(blank ? "blank" : name)}: {created.Name}");
+                    return created;
+                }
+                catch (SelfCheckException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    attempts.Add($"{name}: {ex.GetType().Name}: {ex.Message}");
+                    PhaseLog.Write("selfcheck.setup",
+                        $"attempt {name} FAILED: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    attempt?.Destroy();
+                }
+            }
+
+            throw new SelfCheckException(
+                "无法创建临时测试部件（所有模板候选均被 NX 拒绝）。" +
+                $"NX 报告的可用模板数：{availableTemplates.Length}。" +
+                $"尝试记录：{string.Join("；", attempts)}。");
         }
         catch (SelfCheckException)
         {

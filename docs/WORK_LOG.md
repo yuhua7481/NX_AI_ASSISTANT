@@ -356,3 +356,11 @@
 - **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `9d54a283…`、UI `77990507…`、NxHost `8450e292…`、Entry `a3fed257…`；NX 未运行）。
 - **遗留**：实机复验——PhaseLog 的 `nx application`/`nx template` 行将列出 NX 认可的全部应用与模板名；若列表为空则按诊断指向环境配置。
+
+## 2026-10-17 · Phase 8.1.5 模板候选循环 + 空白模板回退（离线验证通过；部署与实机复验待执行）
+
+- **再取证（决定性）**：PhaseLog 显示 NX 的 `GetAvailableTemplates()` 在 ModelTemplate 应用下**明确列出** `model-plain-1-mm-template.prt`（还有 `空白` 中文条目）。之前 8.1.4 的选择逻辑 `FirstOrDefault(含 -mm-)` 误选了列表中更靠前的 `structuredesign-plain-mm-template.prt`（可能属其他应用授权）而未选 NX+磁盘双确认的 model-plain。
+- **修复**（仅 CreateTempPart）：候选循环按实时证据排序——① `model-plain-1-mm-template.prt`（NX 列出+磁盘存在双重确认，8.1.2 用它失败是因当时属性集不完整，现已修复）；② 其余列出的 -mm- 模板；③ `空白` 条目（NX 的空白模板用 customer defaults 建件，UseBlankTemplate=true + TemplatePresentationName=""，无需模板文件）。每个候选用**全新 FileNew builder**（builder 单次使用，逐次销毁）；全部失败时 SelfCheckException 附 NX 报告的模板总数与每次尝试的精确异常。
+- **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：**NX 正在运行（ugraf.exe），DLL 被锁定——按规则停止部署，未强制覆盖。** 构建产物 SHA-256 已存档：Core `42159b16…`、UI `0a50c5ab…`、NxHost `876a0a58…`；用户退出 NX 后部署并核对。
+- **遗留**：实机复验三候选链（model-plain 预期成功；若三候选全败，诊断含全部尝试异常）。
