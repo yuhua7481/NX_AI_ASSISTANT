@@ -415,3 +415,9 @@
 - **测试**：全量 **376 项 = 375 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：**NX 正在运行（ugraf.exe），DLL 被锁定——按规则停止部署。** 构建产物 SHA：NxHost `afb1698d…`、Core `7bf7eeaa…`；用户退出 NX 后部署并核对。
 - **遗留**：实机复验 caseB（预期：XZ 草图成功提交在 XZ 平面上→旋转校验通过→圆环产生）。
+
+## 2026-10-17 · Phase 8.4 部署（用户确认 NX 关闭后）
+
+- 4 DLL 部署至 `deploy/nxai_custom/application/`，SHA-256 与构建产物核对一致：Core `7bf7eeaa…`、UI `3bc7af21…`、NxHost `afb1698d…`、Entry `d52187d3…`。
+- 待实机复验：几何自检四场景（重点 caseB——XZ 草图应成功提交在 XZ 平面上，旋转产生圆环）。
+- Git：`f18bf1f` 本地提交完成；推送仍失败（GitHub 间歇不可达），网络恢复后重试。
