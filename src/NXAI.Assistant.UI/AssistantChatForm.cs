@@ -57,13 +57,16 @@ public sealed class AssistantChatForm : Form
     private readonly Label _inputHintLabel;
     private readonly Label _modeBarLabel;
     private readonly Func<NxContextSnapshot?>? _contextProvider;
+    private readonly Func<GeometrySelfCheckReport>? _geometrySelfCheck;
 
     public AssistantChatForm(IActivePartReader partReader, INxToolExecutor? toolExecutor = null,
-        Func<NxContextSnapshot?>? contextProvider = null)
+        Func<NxContextSnapshot?>? contextProvider = null,
+        Func<GeometrySelfCheckReport>? geometrySelfCheck = null)
     {
         _partReader = partReader ?? throw new ArgumentNullException(nameof(partReader));
         _toolExecutor = toolExecutor;
         _contextProvider = contextProvider;
+        _geometrySelfCheck = geometrySelfCheck;
         _modeManager = new ExecutionModeManager(new JsonFileExecutionModeStore());
 
         ChatSessionController BuildController() => new(
@@ -131,10 +134,10 @@ public sealed class AssistantChatForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(16, 18, 16, 16),
             ColumnCount = 1,
-            RowCount = 9,
+            RowCount = 11,
         };
         sideTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        for (int i = 0; i < 9; i++)
+        for (int i = 0; i < 11; i++)
             sideTable.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         sideTable.RowStyles[5] = new RowStyle(SizeType.Percent, 100f);
 
@@ -156,9 +159,23 @@ public sealed class AssistantChatForm : Form
         sideTable.Controls.Add(MakeSectionLabel("当前对话", new Padding(0, 24, 0, 2)), 0, 3);
         sideTable.Controls.Add(_sessionStateLabel, 0, 4);
         // row 5: elastic spacer
-        sideTable.Controls.Add(MakeSectionLabel("模型", new Padding(0, 0, 0, 2)), 0, 6);
-        sideTable.Controls.Add(_sidebarModelLabel, 0, 7);
-        sideTable.Controls.Add(_settingsButton, 0, 8);
+        sideTable.Controls.Add(MakeSectionLabel("诊断", new Padding(0, 0, 0, 2)), 0, 6);
+        if (_geometrySelfCheck != null)
+        {
+            var selfCheckButton = MakeFullWidthButton("几何自检");
+            selfCheckButton.Margin = new Padding(0, 0, 0, 0);
+            selfCheckButton.Click += (_, _) => RunGeometrySelfCheck();
+            sideTable.Controls.Add(selfCheckButton, 0, 7);
+            sideTable.Controls.Add(MakeSectionLabel("模型", new Padding(0, 8, 0, 2)), 0, 8);
+            sideTable.Controls.Add(_sidebarModelLabel, 0, 9);
+            sideTable.Controls.Add(_settingsButton, 0, 10);
+        }
+        else
+        {
+            sideTable.Controls.Add(MakeSectionLabel("模型", new Padding(0, 8, 0, 2)), 0, 7);
+            sideTable.Controls.Add(_sidebarModelLabel, 0, 8);
+            sideTable.Controls.Add(_settingsButton, 0, 9);
+        }
         sidebar.Controls.Add(sideTable);
 
         // --- header: session title + model status + active part summary --------
@@ -470,6 +487,39 @@ public sealed class AssistantChatForm : Form
         catch (Exception ex)
         {
             _chatLog.Add(ChatRole.Error, $"NX 上下文读取失败：{ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------ self-check
+
+    /// <summary>
+    /// Runs the in-process geometry self-check (Phase 8-C) in a dedicated
+    /// temporary part and posts the structured report to the chat log. The
+    /// check is synchronous on the NX UI thread and only reachable through
+    /// this explicit button — nothing runs against the user's current part.
+    /// </summary>
+    private void RunGeometrySelfCheck()
+    {
+        if (_geometrySelfCheck == null)
+            return;
+        _chatLog.Add(ChatRole.Info, "几何自检开始：在隔离临时部件中运行核心建模场景（不影响当前部件）。");
+        try
+        {
+            var report = _geometrySelfCheck();
+            _chatLog.Add(ChatRole.Info,
+                $"几何自检完成（{report.PartIdentity}）：{report.PassedCount} 通过 / {report.FailedCount} 失败。");
+            foreach (var c in report.Cases)
+            {
+                var line = $"{(c.Passed ? "✓" : "✗")} {c.Name}：{c.Input}｜预期 {c.Expected}｜实际 {c.Actual}";
+                if (!c.Passed)
+                    _chatLog.Add(ChatRole.Error, $"{line}｜阶段 {c.Stage}｜{c.Error}");
+                else
+                    _chatLog.Add(ChatRole.Info, line);
+            }
+        }
+        catch (Exception ex)
+        {
+            _chatLog.Add(ChatRole.Error, $"几何自检异常：{ex.GetType().Name}: {ex.Message}");
         }
     }
 

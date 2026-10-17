@@ -79,6 +79,61 @@ internal static partial class ToolTagProtocol
         content.Contains(Markers.InvokeOpen, StringComparison.Ordinal);
 
     /// <summary>
+    /// Normalizes one raw call for plan construction: canonical tool name
+    /// (closed alias table), parameter-name aliases, direction-value aliases.
+    /// Used by ModelingPlanFactory so structured and tag-protocol calls take
+    /// the identical normalization path before Schema parsing.
+    /// </summary>
+    public static (string CanonicalName, string ArgumentsJson) NormalizeCall(
+        string functionName, string argumentsJson, out string? error)
+    {
+        error = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(argumentsJson);
+            var root = doc.RootElement.Clone();
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                error = $"工具调用参数必须是 JSON 对象（{functionName}）。";
+                return (functionName, argumentsJson);
+            }
+
+            var parameters = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var prop in root.EnumerateObject())
+            {
+                parameters[prop.Name] = prop.Value.ValueKind == JsonValueKind.String
+                    ? prop.Value.GetString() ?? ""
+                    : prop.Value.GetRawText();
+            }
+
+            var (canonical, normalized, normalizeError) = NormalizeArguments(functionName, parameters);
+            if (normalizeError != null)
+            {
+                error = normalizeError;
+                return (canonical, argumentsJson);
+            }
+
+            var json = new StringBuilder("{");
+            bool first = true;
+            foreach (var (key, value) in normalized)
+            {
+                if (!first)
+                    json.Append(',');
+                first = false;
+                json.Append(JsonSerializer.Serialize(key)).Append(':');
+                json.Append(JsonSerializer.Serialize(value));
+            }
+            json.Append('}');
+            return (canonical, json.ToString());
+        }
+        catch (JsonException)
+        {
+            // Malformed JSON: pass through; the typed parser reports it.
+            return (functionName, argumentsJson);
+        }
+    }
+
+    /// <summary>
     /// Scans assistant content for exactly one complete invoke block.
     /// Multiple blocks, a stray open tag, malformed parameters or an unknown
     /// function-name shape are all protocol errors. Text outside the block

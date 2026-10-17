@@ -26,6 +26,7 @@ public static class NxHostBoot
         }
 
         var contextReader = new NxContextReader();
+        var selfCheck = new NxGeometrySelfCheck(new NxToolExecutor());
         _chatForm = new AssistantChatForm(
             new NxSessionReader(), new NxToolExecutor(),
             contextProvider: () =>
@@ -43,6 +44,13 @@ public static class NxHostBoot
                         $"FAILED provider: {ex.GetType().Name}: {ex.Message}");
                     return null;
                 }
+            },
+            geometrySelfCheck: () =>
+            {
+                var report = selfCheck.RunAll();
+                PhaseLog.Write("selfcheck",
+                    $"{report.PassedCount} passed / {report.FailedCount} failed in {report.PartIdentity}");
+                return report;
             });
         _chatForm.Show();
     }

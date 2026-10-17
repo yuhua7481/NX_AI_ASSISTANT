@@ -298,3 +298,16 @@
 - **测试**：新增 PlaneFrameHandednessTests 4 项（三平面 arc 法向=附加平面法向不变式 + XZ 根因文档化）。全量 **356 项 = 355 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `d0afe62e…`、UI `5638d87d…`、NxHost `d344c6d1…`、Entry `8d6a2b38…`；NX 未运行）。
 - **遗留**：实机验收按 7.4 报告顺序（XY 圆→独立拉伸→XZ U45 圆→绕 Z 旋转 360→重复原故障流）；revolve limits 角度单位语义列入观察项；超时不自动重试已由既有回合机制保证。
+
+## 2026-10-17 · Phase 8 结构化建模计划、串行协调器与 NX 几何自检（离线验证通过；实机验收待执行）
+
+- **范围**：从单点修复转向完整闭环——自然语言→结构化计划→串行执行→几何验证。不新增几何命令。
+- **新增**：
+  - `Core/ModelingPlan.cs`：ModelingPlan/ModelingStep（工具+类型化参数+依赖+引用注入声明+预期几何）、PlanStepStatus/PlanStepResult、ModelingPlanResult（部分完成如实描述）、GeometrySelfCheckCase/Report（UI 可显示，Core 不含 NXOpen）、GeometricExpectation（SketchProfile/BodyBoundingBox/RevolutionEnvelope）。
+  - `Core/ModelingPlanFactory.cs`：模型输出→计划归一化——结构化与标签协议同路（ToolTagProtocol.NormalizeCall 公开入口）、注册表+Schema 全检、依赖步骤引用注入声明（sketch_ref 占位符由依赖真实结果替换）、未知工具/非法参数/超步数（>2）拒绝。
+  - `Core/PlanExecutionCoordinator.cs`：严格串行执行——确认模式每步一卡；自主模式计划级一次提示后连续执行（同一 ExecutionModePolicy）；引用交接（schema 字段名→payload 键 sketchRef 映射）；失败即停+后续 Skipped；描述含已完成/失败/未执行三态。
+  - `NxHost/NxGeometrySelfCheck.cs`：进程内几何自检——PartCollection.FileNew()（已核实 API）创建未保存毫米临时部件，四场景（XY 圆 d30→拉伸 50（bbox (-15,-15,0)–(15,15,50)）；XZ U45 d10 圆→绕 Z 360°（torus 解析 bbox (-50,-50,-5)–(50,50,5)，形状类型注明待实机确认）；四基本体；失效引用拒绝）→ 结构化报告 → BasePart.Close 不保存 → 恢复用户工作部件。仅聊天窗体"几何自检"按钮显式触发，绝不在用户部件跑回归。
+  - `NxHostBoot` 注入自检回调；侧栏新增"诊断/几何自检"入口（回调存在时显示）。
+- **测试**：新增 ModelingPlanTests 14 项（场景 A/B 计划结构+torus 解析包络钉死 (-50,-50,-5)–(50,50,5)、未知工具/非法参数/超步数/空计划拒绝、别名归一化、确认/自主授权、取消、部分完成真话、引用提取）。开发中修复 2 个协调器缺陷（plan 级通知条件反逻辑、sketch_ref→sketchRef 键映射）。全量 **370 项 = 369 通过 / 0 失败 / 1 跳过**；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `e918b21d…`、UI `fe0a3863…`、NxHost `e93ebaa6…`、Entry `a3fed257…`；NX 未运行）。
+- **遗留**：**NX2512 实机验收为完成前提**——①聊天窗体点"几何自检"跑全场景核对报告；②自主模式一句话执行场景 A/B（含圆环体确认 torus 而非同包围盒圆柱）；③确认模式分步确认；④失败/取消路径。FileNew 空模板名 `_blank_mm.prt` 是否匹配本机安装需实机确认（失败会体现在 selfcheck.setup 报告中）。圆环体积/特征类型 API（AskMassProps3d 布局）仍未核实，形状验证为包围盒+实机确认两级。
