@@ -130,13 +130,20 @@ public sealed partial class NxToolExecutor
             sketchBuilder = workPart.Sketches.CreateSketchInPlaceBuilder2(null!);
             if (explicitCsys != null)
             {
-                // Phase 8.3: NX reorients ExistingPlane sketches for XZ/YZ —
-                // the live sketch.Orientation read n=(0,0,1) (XY frame) even
-                // though the Plane normal was (0,-1,0). NewCsys with an
-                // explicit CartesianCoordinateSystem forces NX to use the
-                // exact axes we provide.
+                // Phase 8.3/8.4: NX reorients ExistingPlane sketches for XZ/YZ
+                // (live frame read n=(0,0,1) = XY), so NewCsys + an explicit
+                // CartesianCoordinateSystem is the only way to pin the axes.
+                // Phase 8.5: OriginOption must ALSO be set — the default
+                // (Infer) leaves the builder's origin unresolved and Commit
+                // fails with "输入参数为空或无效" (live failure at 8.4). The
+                // CSYS origin IS the sketch origin: WorkPartOrigin ties it to
+                // the absolute origin our CSYS was constructed with, and
+                // SketchOrigin duplicates that point explicitly.
                 sketchBuilder.PlaneOption = Sketch.PlaneOption.NewCsys;
                 sketchBuilder.Csystem = explicitCsys;
+                sketchBuilder.OriginOption = OriginMethod.WorkPartOrigin;
+                sketchBuilder.SketchOrigin = workPart.Points.CreatePoint(
+                    new Point3d(0, 0, 0));
             }
             else
             {

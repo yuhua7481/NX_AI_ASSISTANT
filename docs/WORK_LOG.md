@@ -421,3 +421,11 @@
 - 4 DLL 部署至 `deploy/nxai_custom/application/`，SHA-256 与构建产物核对一致：Core `7bf7eeaa…`、UI `3bc7af21…`、NxHost `afb1698d…`、Entry `d52187d3…`。
 - 待实机复验：几何自检四场景（重点 caseB——XZ 草图应成功提交在 XZ 平面上，旋转产生圆环）。
 - Git：`f18bf1f` 本地提交完成；推送仍失败（GitHub 间歇不可达），网络恢复后重试。
+
+## 2026-10-17 · Phase 8.5 NewCsys 补 OriginOption/SketchOrigin（离线验证通过；已部署；实机复验待执行）
+
+- **再取证**：8.4 非临时 CSYS 仍报"输入参数为空或无效"——排除临时性后，唯一剩余解释是 NewCsys 方式还要求显式设置**原点**相关属性（反射核实 SketchInPlaceBuilder 有 OriginOption: OriginMethod（SpecifyPoint/WorkPartOrigin）与 SketchOrigin: Point 属性，二者从未被设置，默认 Infer 状态下 origin 未解析）。
+- **修复**（仅 NewCsys 分支）：补 `OriginOption = OriginMethod.WorkPartOrigin` + `SketchOrigin = Points.CreatePoint(0,0,0)`（与 CSYS 构造原点一致）。
+- **测试**：全量 **376 项 = 375 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误。
+- **部署**：4 DLL SHA-256 一致（Core `044ef6a3…`、UI `4bd31bae…`、NxHost `7eb0108e…`、Entry `d52187d3…`；NX 未运行）。
+- **遗留**：实机复验 caseB。若仍失败，下一排查项是 OriginOption=SpecifyPoint + SketchOrigin 指向 CSYS 原点（而非 WorkPartOrigin）。
