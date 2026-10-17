@@ -364,3 +364,12 @@
 - **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：**NX 正在运行（ugraf.exe），DLL 被锁定——按规则停止部署，未强制覆盖。** 构建产物 SHA-256 已存档：Core `42159b16…`、UI `0a50c5ab…`、NxHost `876a0a58…`；用户退出 NX 后部署并核对。
 - **遗留**：实机复验三候选链（model-plain 预期成功；若三候选全败，诊断含全部尝试异常）。
+
+## 2026-10-17 · Phase 8.1.6 种子部件副本方案（离线验证通过；部署完成；实机复验需先放置种子）
+
+- **决定性证据**：8.1.5 候选循环把 NX 自己列出的全部 430 个模板（含"空白"）逐一提交，全部以同一个"选定的模板不存在"失败——**FileNew 在本会话结构性不可用**（会话未加载任何可用的模板注册数据），属性集/名字/候选循环全部排除。
+- **修复**（仅 NxGeometrySelfCheck.cs）：改为**种子部件副本优先**——①种子查找顺序：环境变量 `NXAI_SELFCHECK_SEED_PART` → 部署目录 `selfcheck/seed-mm.prt`（DLL 旁）→ `%TEMP%\nxai_selfcheck_seed_mm.prt`；②把种子**复制**到 %TEMP% 唯一副本（种子文件永不触碰）；③`PartCollection.OpenDisplay`（已核实签名）打开副本；④核对毫米单位；⑤测试后关闭不保存+删除副本；⑥OpenDisplay 失败逐种子记录并尝试下一位置。FileNew 路径（8.1.2/8.1.4 契约）保留为回退；种子+FileNew 全失败时诊断给出种子放置位置与一次性操作说明（NX 手工新建毫米部件另存为该名）。
+- **用户一次性操作**：在 NX 中新建一个毫米模型部件（不画任何东西）→ 另存为 `deploy\nxai_custom\application\selfcheck\seed-mm.prt`。此后自检永久可用。
+- **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `519e962f…`、UI `b1847164…`、NxHost `ab22848e…`、Entry `a3fed257…`；NX 未运行）；已创建 `deploy/nxai_custom/application/selfcheck/` 目录（空，待放种子）。
+- **遗留**：用户放置种子部件 → 点"几何自检" → 四场景报告 → 场景 A/B 端到端。

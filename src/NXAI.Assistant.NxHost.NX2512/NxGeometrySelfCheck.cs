@@ -43,7 +43,16 @@ public sealed class NxGeometrySelfCheck
         public SelfCheckException(string message, Exception? inner = null) : base(message, inner) { }
     }
 
-    /// <summary>Runs all self-check cases in a fresh temporary part.</summary>
+    /// <summary>Runs all self-check cases in a fresh temporary part.
+    ///
+    /// Phase 8.1.6: the part-creation strategy is SEED-PART-FIRST. FileNew
+    /// is structurally unusable in this session (430 registered templates —
+    /// including NX's own "空白" — all rejected with "选定的模板不存在",
+    /// live-verified), so the primary path copies a KNOWN-GOOD millimeter
+    /// seed part to %TEMP% and opens the COPY via the verified
+    /// PartCollection.OpenDisplay API; the seed file itself is never
+    /// touched, and the copy is closed without saving and deleted. FileNew
+    /// remains as a fallback candidate for installs where it works.</summary>
     public GeometrySelfCheckReport RunAll()
     {
         var session = Session.GetSession();
@@ -51,12 +60,13 @@ public sealed class NxGeometrySelfCheck
         var originalDisplayed = session.Parts.Display;
 
         Part? tempPart = null;
+        string? tempCopyPath = null;
         var cases = new List<CaseResult>();
         string partIdentity = "（临时部件创建失败）";
         try
         {
-            tempPart = CreateTempPart(session);
-            partIdentity = $"{tempPart.Name}（未保存临时部件，单位 {tempPart.PartUnits}）";
+            (tempPart, tempCopyPath) = CreateTempPart(session);
+            partIdentity = $"{tempPart.Name}（自检副本，单位 {tempPart.PartUnits}）";
             session.Parts.SetWork(tempPart);
 
             cases.Add(CheckXyCircleExtrude(tempPart));
@@ -84,6 +94,18 @@ public sealed class NxGeometrySelfCheck
             {
                 cases.Add(new CaseResult("selfcheck.cleanup", false, "cleanup",
                     "关闭临时部件", "关闭且不保存", "关闭失败", closeEx.Message));
+            }
+
+            // Delete the %TEMP% copy of the seed part (seed file untouched).
+            try
+            {
+                if (tempCopyPath != null && File.Exists(tempCopyPath))
+                    File.Delete(tempCopyPath);
+            }
+            catch (Exception deleteEx)
+            {
+                cases.Add(new CaseResult("selfcheck.cleanup.copy", false, "cleanup",
+                    "删除临时副本", "副本已删除", "删除失败", deleteEx.Message));
             }
 
             // Restore the user's part as displayed/work.
@@ -173,26 +195,101 @@ public sealed class NxGeometrySelfCheck
             "请确认 NX2512 安装完整（UGII/templates 下应存在 model-plain-*-mm-template.prt）。");
     }
 
-    /// <summary>Creates an unsaved millimeter part using a template name NX
-    /// ITSELF lists as available. NewFileName is a %TEMP% path so NX never
-    /// touches a user file; the part is closed without saving afterwards.
-    ///
-    /// Phase 8.1.4: GetMatchingTemplates(FileNewApplication, …) throws
-    /// "遇到无效的函数参数" on this install — the enum-based API is dead here
-    /// (deprecated since NX9). The supported path (verified NXOpen.xml):
-    ///   1. fileNew.GetApplicationNames()  — all registered application
-    ///      names; the doc says these are exactly what ApplicationName takes;
-    ///   2. pick the modeling application (contains "model", case-insensitive)
-    ///      and set ApplicationName BEFORE querying;
-    ///   3. fileNew.GetAvailableTemplates() — template names available for
-    ///      the CURRENT builder state (NX6+, no arguments);
-    ///   4. prefer a name containing "-mm-" (file naming convention), else
-    ///      the first entry; set TemplateFileName to it;
-    ///   5. commit with the full journal attribute contract (8.1.2).
-    /// Every step is logged; empty lists produce diagnostics naming the
-    /// application names NX reported.
+    /// <summary>
+    /// Creates the self-check part. Phase 8.1.6, SEED-PART-FIRST: FileNew is
+    /// structurally unusable in the live session (430 registered templates —
+    /// including NX's own "空白" blank entry — all rejected with "选定的模板
+    /// 不存在"; live-verified). Primary path: copy a KNOWN-GOOD millimeter
+    /// seed part to %TEMP% and open the COPY via the verified
+    /// PartCollection.OpenDisplay; the seed file is never touched, the copy
+    /// is closed without saving and deleted. Seed locations, in order:
+    ///   1. NXAI_SELFCHECK_SEED_PART environment variable (absolute .prt path);
+    ///   2. the plugin's own directory (next to the deployed DLLs),
+    ///      selfcheck/seed-mm.prt;
+    ///   3. %TEMP%/nxai_selfcheck_seed_mm.prt.
+    /// Fallback: the FileNew path from 8.1.2/8.1.4 (kept for installs where
+    /// the template registry works). Every failure names its stage.
     /// </summary>
-    private static Part CreateTempPart(Session session)
+    private static (Part Part, string? CopyPath) CreateTempPart(Session session)
+    {
+        // --- primary: seed-part copy ---
+        var seedLocations = new List<string>();
+        var envSeed = Environment.GetEnvironmentVariable("NXAI_SELFCHECK_SEED_PART");
+        if (!string.IsNullOrWhiteSpace(envSeed))
+            seedLocations.Add(envSeed);
+        try
+        {
+            // The plugin DLL directory (where NxHost is deployed).
+            var assemblyDir = Path.GetDirectoryName(typeof(NxGeometrySelfCheck).Assembly.Location);
+            if (!string.IsNullOrEmpty(assemblyDir))
+                seedLocations.Add(Path.Combine(assemblyDir, "selfcheck", "seed-mm.prt"));
+        }
+        catch
+        {
+            // assembly location unavailable: skip this candidate
+        }
+        seedLocations.Add(Path.Combine(Path.GetTempPath(), "nxai_selfcheck_seed_mm.prt"));
+
+        foreach (var seed in seedLocations)
+        {
+            if (string.IsNullOrWhiteSpace(seed) || !File.Exists(seed))
+                continue;
+
+            var copyPath = Path.Combine(
+                Path.GetTempPath(),
+                $"nxai_selfcheck_copy_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..8]}.prt");
+            try
+            {
+                File.Copy(seed, copyPath, overwrite: true);
+                PhaseLog.Write("selfcheck.setup",
+                    $"seed copy: {seed} -> {copyPath}");
+                var loaded = session.Parts.OpenDisplay(copyPath, out var loadStatus);
+                if (loaded == null)
+                {
+                    PhaseLog.Write("selfcheck.setup",
+                        "OpenDisplay returned null");
+                    File.Delete(copyPath);
+                    continue;
+                }
+                if (loaded.PartUnits != BasePart.Units.Millimeters)
+                    throw new SelfCheckException($"种子部件副本单位是 {loaded.PartUnits}，预期毫米。");
+                PhaseLog.Write("selfcheck.setup", $"temp part opened: {loaded.Name}");
+                return (loaded, copyPath);
+            }
+            catch (SelfCheckException)
+            {
+                try { if (File.Exists(copyPath)) File.Delete(copyPath); } catch { }
+                throw;
+            }
+            catch (Exception ex)
+            {
+                PhaseLog.Write("selfcheck.setup",
+                    $"seed candidate {seed} FAILED: {ex.GetType().Name}: {ex.Message}");
+                try { if (File.Exists(copyPath)) File.Delete(copyPath); } catch { }
+                // Try the next seed location.
+            }
+        }
+
+        // --- fallback: FileNew (8.1.2/8.1.4 contract) ---
+        PhaseLog.Write("selfcheck.setup",
+            "seed part not found in any location; falling back to FileNew");
+        try
+        {
+            var part = CreateTempPartViaFileNew(session);
+            return (part, null);
+        }
+        catch (SelfCheckException ex)
+        {
+            throw new SelfCheckException(
+                ex.Message +
+                " 【种子部件方案亦不可用：请在以下任一位置放置一个毫米制空部件：" +
+                string.Join("；", seedLocations) +
+                "。可用 NX 手工新建一个毫米模型部件并另存为该文件名。】", ex);
+        }
+    }
+
+    /// <summary>FileNew fallback (8.1.2/8.1.4 contract, kept verbatim).</summary>
+    private static Part CreateTempPartViaFileNew(Session session)
     {
         // Cross-check only: the on-disk mm template (diagnostic context).
         var templatePath = DiscoverMillimeterTemplate(out string searchedDirectories);
@@ -249,13 +346,11 @@ public sealed class NxGeometrySelfCheck
 
             // 4. Candidate selection, ordered by live evidence:
             //    a) model-plain-1-mm-template.prt — NX lists it AND it exists
-            //       on disk (double confirmation); the 8.1.2 failure with this
-            //       name was caused by the INCOMPLETE property set, fixed in
-            //       8.1.2/8.1.4, so it is the first candidate again.
+            //       on disk; the 8.1.2 failure with this name was caused by
+            //       the INCOMPLETE property set, since fixed.
             //    b) any other listed "-mm-" template.
             //    c) the "空白" (blank) entry NX lists — a blank part uses
-            //       customer defaults instead of a seed part; combined with
-            //       UseBlankTemplate=true it needs no template file at all.
+            //       customer defaults instead of a seed part.
             var candidates = new List<(string Name, bool Blank)>();
             var preferred = availableTemplates.FirstOrDefault(t =>
                 t.Equals("model-plain-1-mm-template.prt", StringComparison.OrdinalIgnoreCase));
@@ -270,10 +365,7 @@ public sealed class NxGeometrySelfCheck
             if (candidates.Count == 0)
                 candidates.Add((availableTemplates[0], false));
 
-            // 5. Try each candidate with the full journal attribute contract
-            //    (8.1.2). The blank candidate sets UseBlankTemplate=true and
-            //    skips the seed-part fields. Each attempt gets a FRESH builder
-            //    (a builder is single-use: destroyed after every attempt).
+            // 5. Try each candidate; each attempt gets a FRESH builder.
             var attempts = new List<string>();
             foreach (var (name, blank) in candidates)
             {
