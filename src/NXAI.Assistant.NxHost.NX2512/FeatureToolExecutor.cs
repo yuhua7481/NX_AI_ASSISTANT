@@ -282,24 +282,8 @@ public sealed partial class NxToolExecutor
         ufSession.Modl.AskFaceProps(face.Tag,
             new double[] { uMid, vMid }, center, u1, v1, u2, v2, unitNorm, radii);
         origin = new Point3d(center[0], center[1], center[2]);
-        var n = VecNormalize(new Vector3d(unitNorm[0], unitNorm[1], unitNorm[2]));
-
-        // Deterministic in-plane u axis: project world X (or Y when nearly
-        // parallel to the normal).
-        var worldX = new Vector3d(1, 0, 0);
-        var u = Math.Abs(VecDot(n, worldX)) < 0.99 ? worldX : new Vector3d(0, 1, 0);
-        u = VecNormalize(new Vector3d(u.X - VecDot(n, u) * n.X, u.Y - VecDot(n, u) * n.Y, u.Z - VecDot(n, u) * n.Z));
-        var v = VecNormalize(Cross(n, u));
-        normal = n;
-        // Store u/v via out params through the tuple below (kept simple).
-        PlaneUVector = u;
-        PlaneVVector = v;
+        normal = VecNormalize(new Vector3d(unitNorm[0], unitNorm[1], unitNorm[2]));
     }
-
-    // Scratch frame vectors for the current sketch creation (single-threaded
-    // NX UI-thread execution makes this safe; documented limitation).
-    private static Vector3d PlaneUVector;
-    private static Vector3d PlaneVVector;
 
     private static Vector3d Cross(Vector3d a, Vector3d b) =>
         new(a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
@@ -316,12 +300,23 @@ public sealed partial class NxToolExecutor
         sketch.Activate(Sketch.ViewReorient.False);
         try
         {
+            // The sketch's OWN coordinate system is the only authority for
+            // where its local U/V axes point and where its plane lies.
+            // Deriving a frame by hand (Phase ≤7.4) disagreed with the CSYS
+            // NX assigns for the XZ plane — the arc came out on a different
+            // plane and AddGeometry rejected it with "圆弧的平面必须与草图
+            // 平面平行" (live failure, Phase 8.2). Orientation's element
+            // matrix is row-major with the local axes as COLUMNS (same
+            // verified mapping as TryGetSketchFrame): local X = (Xx,Yx,Zx),
+            // local Y = (Xy,Yy,Zy), local Z (plane normal) = (Xz,Yz,Zz).
             var origin = sketch.Origin;
-            Vector3d u = PlaneUVector, v = PlaneVVector;
-            // WCS planes have a fixed frame that matches the plane definition.
-            // For them the scratch vectors were never set by the face path.
-            if (parameters.PlaneMode != SketchPlaneMode.SelectedPlane)
-                GetWcsPlaneFrame(parameters.PlaneMode, out origin, out u, out v);
+            Matrix3x3 m = sketch.Orientation.Element;
+            var u = VecNormalize(new Vector3d(m.Xx, m.Yx, m.Zx));
+            var v = VecNormalize(new Vector3d(m.Xy, m.Yy, m.Zy));
+            var n = VecNormalize(new Vector3d(m.Xz, m.Yz, m.Zz));
+            PhaseLog.Write("execute.sketch",
+                $"frame from sketch orientation: u=({u.X:F3},{u.Y:F3},{u.Z:F3}) " +
+                $"v=({v.X:F3},{v.Y:F3},{v.Z:F3}) n=({n.X:F3},{n.Y:F3},{n.Z:F3})");
 
             Point3d ProfilePoint(double du, double dv) => new(
                 origin.X + du * u.X + dv * v.X,
@@ -347,18 +342,12 @@ public sealed partial class NxToolExecutor
             {
                 double r = parameters.CircleDiameter / 2.0;
                 var center = ProfilePoint(parameters.CenterU, parameters.CenterV);
-                // CreateArc's normal is xDir × yDir (verified NXOpen docs:
-                // "whose normal is Z axis"). The sketch plane's normal is the
-                // plane frame's n; the frame is right-handed (v = n × u), so
-                // passing (u, n × u) yields normal = u × (n × u) = n. Passing
-                // the frame's v directly is WRONG when v ≠ n × u — for XZ
-                // (u=+X, v=+Z) the cross product is −Y, the reverse of the
-                // sketch normal +Y, and AddGeometry rejected the arc with
-                // "圆弧的平面必须与草图平面平行" (Phase 7.4 root cause A).
-                var n = VecNormalize(Cross(u, v));
-                var arcY = VecNormalize(Cross(n, u));
+                // CreateArc's normal is xDir × yDir (verified NXOpen docs).
+                // Passing the sketch's OWN local axes (u, v) makes the arc's
+                // normal = u × v = the sketch plane normal by construction —
+                // NX cannot reject it for plane mismatch.
                 Arc circle = workPart.Curves.CreateArc(
-                    center, u, arcY, r, 0.0, 2.0 * Math.PI);
+                    center, u, v, r, 0.0, 2.0 * Math.PI);
                 sketch.AddGeometry(circle, Sketch.InferConstraintsOption.InferNoConstraints);
             }
             sketch.Update();
@@ -366,29 +355,6 @@ public sealed partial class NxToolExecutor
         finally
         {
             sketch.Deactivate(Sketch.ViewReorient.False, Sketch.UpdateLevel.Model);
-        }
-    }
-
-    private static void GetWcsPlaneFrame(
-        SketchPlaneMode mode, out Point3d origin, out Vector3d u, out Vector3d v)
-    {
-        origin = new Point3d(0, 0, 0);
-        switch (mode)
-        {
-            case SketchPlaneMode.WcsXY:
-                u = new Vector3d(1, 0, 0);
-                v = new Vector3d(0, 1, 0);
-                break;
-            case SketchPlaneMode.WcsXZ:
-                u = new Vector3d(1, 0, 0);
-                v = new Vector3d(0, 0, 1);
-                break;
-            case SketchPlaneMode.WcsYZ:
-                u = new Vector3d(0, 1, 0);
-                v = new Vector3d(0, 0, 1);
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(mode));
         }
     }
 

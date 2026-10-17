@@ -373,3 +373,12 @@
 - **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `519e962f…`、UI `b1847164…`、NxHost `ab22848e…`、Entry `a3fed257…`；NX 未运行）；已创建 `deploy/nxai_custom/application/selfcheck/` 目录（空，待放种子）。
 - **遗留**：用户放置种子部件 → 点"几何自检" → 四场景报告 → 场景 A/B 端到端。
+
+## 2026-10-17 · Phase 8.2 XZ 草图圆弧平面对齐修复（离线验证通过；已部署；实机复验待执行）
+
+- **自检首战结果**（种子方案生效）：setup/caseA（XY 圆→拉伸）/caseC（四基本体）/caseD（失效引用拒绝）全部通过；**caseB（XZ U45 d10 圆→绕 Z 360°）失败**——XZ 草图 committed 后随即被后置验证回滚，异常 `AddGeometry: 圆弧的平面必须与草图平面平行`（operation_error.log 实录）；旋转报"试图使用不活动的对象"是引用已回滚草图的次生错误。
+- **根因**：BuildSketchProfile 用手工推算 frame（GetWcsPlaneFrame + u×v 推导）构造圆弧，但 **NX 给 XZ 平面草图实际分配的坐标系以 sketch.Orientation 为权威**，两者不一致——圆弧落在与草图平面不重合的平面上被拒。
+- **修复**（仅 FeatureToolExecutor.cs BuildSketchProfile）：激活后直接从 `sketch.Orientation.Element` 读 NX 实际局部轴（u=列1/v=列2/n=列3，与 TryGetSketchFrame 同源已核实映射）；圆弧用草图自身 (u,v) 构造→法向=草图平面法向 by construction；center_u/v 沿 NX 实际 u/v 轴偏移。删除手工推算的 GetWcsPlaneFrame 与 PlaneU/VVector scratch 静态量。PhaseLog 新增 frame 输出行（u/v/n 实测值）。
+- **测试**：全量 **373 项 = 372 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
+- **部署**：4 DLL SHA-256 一致（Core `085108f7…`、UI `29649286…`、NxHost `ee23ec5e…`、Entry `0a779111…`；NX 未运行）。
+- **遗留**：实机复验——点"几何自检"预期四场景全 ✓；随后核对 XZ U45 的世界坐标映射（PhaseLog frame 行可证实 NX 的 XZ 局部轴方向）；场景 A/B 端到端。
