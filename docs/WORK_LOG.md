@@ -437,3 +437,20 @@
 - **测试**：全量 **376 项 = 375 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误；git diff --check 通过。
 - **部署**：4 DLL SHA-256 一致（Core `4890e4cb…`、UI `e84a0878…`、NxHost `4489bf65…`、Entry `d52187d3…`；NX 未运行）。
 - **遗留**：实机复验——点"几何自检"预期四场景全 ✓（caseB XZ U45 圆草图应成功提交在 XZ 平面上→旋转产生圆环）→ 场景 A/B 端到端。
+
+## 2026-10-18 · Phase 8.7 Revolve Commit AV 根因修复（实机验收全部通过；案例B闭环）
+
+- **实机故障矩阵**（PhaseLog + operation_error.log 逐轮取证）：
+  ① caseB 在 `RevolveBuilder.CommitFeature()` 处 NX 原生**内存访问违例（AV）**——仅发生在非关联 `CreateAxis(Point3d, Vector3d)` 轴的路径（实验 A 改关联 Point+Direction 重载后 AV 消失，但未能单独证实为根因）。
+  ② 按用户录制 journal.cs（NX GUI 实录，XZ 草图+Revolve 成功序列）对齐后，AV 彻底消失——变为可捕获的托管异常（不再进程级）。
+  ③ `RegionBoundaryRule` 两次实机失败"缺少截面线串"（seedPoint 从 sketch.Origin 改为圆心 (45,0,0) 后仍失败）——该规则在程序化构建语境不可用，回退到 caseA 实证成功的 `CurveFeatureRule`。
+  ④ CommitFeature 成功、圆环真实产生（实测 (-50,-50,-5)–(50,50,5)）后，被自家后置校验**误拒**——校验包络算出 ±50.249。
+- **根因**（层层排除后最终定位）：`ComputeRevolveEnvelopeAabb` 的 Arc 分支用 `center ± r` 在全三轴取点——落到圆自身平面外，产生假点（caseB 圆心 (45,0,0) r=5 → 伪造 Y=±5 点），径向距离膨胀 √(50²+5²)≈50.249 > 0.01mm 容差 → 正确圆环被拒回滚。同文件拉伸版 `ComputeProfileExtrudeAabb` 在 Phase 7.2 已修同款 bug（注释"never a 3D box-corner set"），旋转版漏修。
+- **修复**（仅 FeatureToolExecutor.cs）：
+  ① 新增 `CreateRevolveSectionFromSketch`（revolve 专用）：按 journal.cs 序列镜像——3 参 `CreateSection(0.0095,0.01,0.5)`+容差、`OnlyCurves`、`CurveFeatureRule`+`seed=null`+7 参 `AddToSection(chainWithinFeature=false)`、**`EvaluateAndAskOutputEntities`**（此前从未调用）、RegionBoundary 实机失败如实记录在注释。共享 `CreateSectionFromSketch`（extrude）不动。
+  ② `ExecuteCreateRevolve` 配置段按 journal 顺序重建：builder→Limits→`Tolerance=0.01`→Section 早挂→`SmartVolumeProfile(FCI)`→`SetStart/EndLimitHelperPoint((0,0,0))`→`CreateAxis(null, Direction)`（journal :895-899 原文 null Point）+Axis 双赋值→`ParentFeatureInternal=true`→Commit。RegionBoundary 交换为已验证的 CurveFeatureRule。
+  ③ `ComputeRevolveEnvelopeAabb` Arc 分支改为圆自身平面上的极端点（`center ± r·xDir / ± r·yDir`，`arc.Matrix` 列=局部轴），与拉伸版同款已验证数学。
+- **测试**：新增 `RevolveEnvelopeAabbTests` 2 项（caseB 精确几何的环面包络钉死 (-50,-50,-5)–(50,50,5)、box-corner 必然膨胀 50.249 文档化）。全量 **378 项 = 377 通过 / 0 失败 / 1 跳过**（无回归）；Release 0 警告 0 错误。
+- **部署**：NxHost DLL SHA-256 一致（`77378ea1…`；NX 未运行）。
+- **实机验收（2026-10-18 07:45）**：几何自检 **4/4 全 ✓**——caseA (XY 圆 d30→拉伸 50, bbox 匹配) / caseB (XZ U45 d10 圆→绕 Z 360°，bbox 精确 (-50,-50,-5)–(50,50,5)) / caseC (四基本体) / caseD (失效引用安全拒绝)；**场景 B 端到端**对话链路成功——XZ 草图 SKETCH_000 创建→旋转 REVOLVED(2) 引用返回，AV 终结。
+- **遗留**：远端推送（GitHub 间歇不可达）；本轮为 caseB 专项收官，布尔三运算等其余实机待复验项保持既有清单。

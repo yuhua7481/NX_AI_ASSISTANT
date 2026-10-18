@@ -551,6 +551,114 @@ public sealed partial class NxToolExecutor
     }
 
     /// <summary>
+    /// Builds a Revolve Section mirroring the NX GUI journal sequence
+    /// (user-recorded journal.cs, working reference for NX2512):
+    /// CreateSection(0.0095, 0.01, 0.5) → tolerances → OnlyCurves →
+    /// RegionBoundaryRule(seed=sketch, seedPoint on curve) →
+    /// AddToSection(seed=null, chainWithinFeature=false) →
+    /// EvaluateAndAskOutputEntities. Each stage is PhaseLog-annotated so a
+    /// native AV during CommitFeature can be attributed to a stage.
+    /// </summary>
+    private static (Section? Section, string? Error) CreateRevolveSectionFromSketch(
+        Part workPart, Sketch sketch)
+    {
+        PhaseLog.Write("execute.revolve.section", "begin");
+        Feature? sketchFeature = sketch.Feature;
+        if (sketchFeature == null)
+        {
+            PhaseLog.Write("execute.revolve.section", "FAIL: sketch has no feature");
+            return (null, "草图没有关联的特征对象，无法构建截面。");
+        }
+
+        NXObject[] geometry;
+        try
+        {
+            geometry = sketch.GetAllGeometry();
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("execute.revolve.section", $"FAIL: GetAllGeometry: {ex.Message}");
+            return (null, $"无法读取草图几何作为截面种子：{ex.Message}");
+        }
+        var curves = geometry.OfType<ICurve>().ToArray();
+        if (curves.Length == 0)
+        {
+            PhaseLog.Write("execute.revolve.section", "FAIL: no curves");
+            return (null, "草图中没有可用曲线，无法构建截面。");
+        }
+        foreach (var c in curves)
+        {
+            if (c is NXObject curveObj && IsDead(curveObj))
+            {
+                PhaseLog.Write("execute.revolve.section", $"FAIL: curve not alive: {curveObj.JournalIdentifier}");
+                return (null, $"草图曲线 {curveObj.JournalIdentifier} 已失效，无法作为截面。");
+            }
+        }
+        var seedCurve = (NXObject)curves[0];
+        PhaseLog.Write("execute.revolve.section", $"curves={curves.Length} seed={seedCurve?.JournalIdentifier ?? (curves[0] as NXObject)?.JournalIdentifier}");
+
+        bool activated = false;
+        try
+        {
+            if (!sketch.IsActive)
+            {
+                sketch.Activate(Sketch.ViewReorient.False);
+                activated = true;
+                PhaseLog.Write("execute.revolve.section", "sketch activated");
+            }
+
+            // Journal sequence (journal.cs:29, 42-44, 58, 795-797):
+            // 3-arg CreateSection with NX's own default tolerances, then
+            // explicit DistanceTolerance/ChainingTolerance.
+            Section section = workPart.Sections.CreateSection(
+                0.0094999999999999998, 0.01, 0.5);
+            PhaseLog.Write("execute.revolve.section", "section created (journal tolerances)");
+
+            // Rule: the extrude path's CurveFeatureRule is proven live on this
+            // sketch type (caseA passes end-to-end with the same shared
+            // pattern); the journal's RegionBoundary rule failed twice in
+            // real NX with "缺少截面线串" (2026-10-18, even with the seed
+            // point on the region boundary). Keep the journal's other
+            // AV-relevant fixes (3-arg section + tolerances, OnlyCurves,
+            // EvaluateAndAskOutputEntities, seed=null + 7-arg AddToSection).
+            SelectionIntentRule[] rules =
+                { workPart.ScRuleFactory.CreateRuleCurveFeature(new[] { sketchFeature }) };
+            section.SetAllowedEntityTypes(Section.AllowTypes.OnlyCurves);
+            section.AddToSection(rules, null!, null!, null!,
+                sketch.Origin, Section.Mode.Create, false);
+            PhaseLog.Write("execute.revolve.section", "addToSection ok (curve feature rule, seed=null)");
+
+            // Journal: section must be explicitly evaluated before being
+            // handed back to the builder (journal.cs:842) — skipping this
+            // leaves the section unmaterialized for CommitFeature.
+            section.EvaluateAndAskOutputEntities(out _);
+            PhaseLog.Write("execute.revolve.section", "evaluate ok");
+            return (section, null);
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("execute.revolve.section",
+                $"FAIL: {ex.GetType().Name}: {ex.Message} stack={(ex.StackTrace ?? "").Split('\n').FirstOrDefault() ?? ""}");
+            throw;
+        }
+        finally
+        {
+            if (activated)
+            {
+                try
+                {
+                    sketch.Deactivate(Sketch.ViewReorient.False, Sketch.UpdateLevel.Model);
+                    PhaseLog.Write("execute.revolve.section", "sketch deactivated");
+                }
+                catch (Exception ex)
+                {
+                    PhaseLog.Write("execute.revolve.section", $"WARN deactivate: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// NX liveness check: a disposed/moved-to-void wrapper or an object whose
     /// tag no longer resolves is dead. JournalIdentifier is only read when
     /// the object answers, so logging never triggers the JAM error itself.
@@ -923,17 +1031,53 @@ public sealed partial class NxToolExecutor
         RevolveBuilder? revolveBuilder = null;
         try
         {
-            var (section, sectionError) = CreateSectionFromSketch(workPart, sketch);
-            if (section == null)
-                throw new InvalidOperationException(sectionError!);
-
+            // Experiment A'+C (caseB AV): mirror the user-recorded NX GUI
+            // journal (journal.cs) which is the only verified-working
+            // NX2512 revolve sequence. Journal order (journal.cs line refs):
+            // builder → limits → tolerance → section (3-arg + tolerances) →
+            // SmartVolumeProfile → start/end limit helper points →
+            // section attached early → rules/seed=null AddToSection →
+            // EvaluateAndAskOutputEntities → helper points again →
+            // Axis=CreateAxis(null, Direction), assigned twice →
+            // ParentFeatureInternal=true → CommitFeature.
             revolveBuilder = workPart.Features.CreateRevolveBuilder(null!);
-            revolveBuilder.Section = section;
-            revolveBuilder.Axis = workPart.Axes.CreateAxis(
-                axisPoint, axisVector, SmartObject.UpdateOption.WithinModeling);
             revolveBuilder.Limits.StartExtend.Value.SetFormula("0");
             revolveBuilder.Limits.EndExtend.Value.SetFormula(
                 FormatLength(parameters.AngleDeg));
+            revolveBuilder.Tolerance = 0.01;
+            PhaseLog.Write("execute.revolve", "builder created, limits+tolerance set");
+
+            var (section, sectionError) = CreateRevolveSectionFromSketch(workPart, sketch);
+            if (section == null)
+                throw new InvalidOperationException(sectionError!);
+            revolveBuilder.Section = section;
+            PhaseLog.Write("execute.revolve", "section attached (early, journal order)");
+
+            revolveBuilder.SmartVolumeProfile.OpenProfileSmartVolumeOption = false;
+            revolveBuilder.SmartVolumeProfile.CloseProfileRule =
+                SmartVolumeProfileBuilder.CloseProfileRuleType.Fci;
+            PhaseLog.Write("execute.revolve", "smart volume profile set");
+
+            // Journal sets start/end limit helper points both at builder
+            // configuration and again after section work (:46-56, 799-809).
+            var zeroHelper = new double[] { 0.0, 0.0, 0.0 };
+            revolveBuilder.SetStartLimitHelperPoint(zeroHelper);
+            revolveBuilder.SetEndLimitHelperPoint(zeroHelper);
+            PhaseLog.Write("execute.revolve", "limit helper points set (pass 1)");
+
+            // Journal axis construction (:890-899): CreateAxis(null, Direction)
+            // — NX's own GUI passes a null Point and only a Direction; then
+            // re-assigns the Axis property after limit points (:899, 918).
+            var axisDirection = workPart.Directions.CreateDirection(
+                axisPoint, VecNormalize(axisVector),
+                SmartObject.UpdateOption.WithinModeling);
+            var axis = workPart.Axes.CreateAxis(
+                null!, axisDirection, SmartObject.UpdateOption.WithinModeling);
+            revolveBuilder.Axis = axis;
+            revolveBuilder.Limits.StartExtend.Value.SetFormula("0");
+            revolveBuilder.Limits.EndExtend.Value.SetFormula(
+                FormatLength(parameters.AngleDeg));
+            revolveBuilder.Axis = axis;
             PhaseLog.Write("execute.revolve",
                 $"builder configured: axis={axisDescription} angle={parameters.AngleDeg}");
 
@@ -942,6 +1086,9 @@ public sealed partial class NxToolExecutor
             // root cause B) — the IsDead gate above exists precisely to
             // prevent this path. An AV here is process-fatal and cannot be
             // caught; the gate + PhaseLog trail are the defenses.
+            // Journal: ParentFeatureInternal=true is set immediately before
+            // CommitFeature in NX's own recorded sequence (journal.cs:928).
+            revolveBuilder.ParentFeatureInternal = true;
             revolveBuilder.CommitFeature();
             session.UpdateManager.DoUpdate(markId);
             PhaseLog.Write("execute.revolve", "commit done");
@@ -1078,10 +1225,23 @@ public sealed partial class NxToolExecutor
                     break;
                 case Arc arc:
                 {
+                    // Extreme points ON the arc's own plane (center ± r·xDir,
+                    // center ± r·yDir) — exactly the fixed ComputeProfileExtrudeAabb
+                    // approach. A box-corner set (c ± r in all three axes)
+                    // yields points off the circle's plane: for the XZ-plane
+                    // caseB circle it manufactured a Y=±5 point that inflated
+                    // the radial reach to sqrt(50²+5²)=50.249 and wrongly
+                    // rejected the correct torus after a successful commit
+                    // (live, 2026-10-18).
                     double r = arc.Radius;
                     var c = arc.CenterPoint;
-                    pts.Add(new Point3d(c.X - r, c.Y - r, c.Z - r));
-                    pts.Add(new Point3d(c.X + r, c.Y + r, c.Z + r));
+                    var m = arc.Matrix.Element;
+                    var x = new Vector3d(m.Xx, m.Yx, m.Zx);
+                    var y = new Vector3d(m.Xy, m.Yy, m.Zy);
+                    pts.Add(new Point3d(c.X + r * x.X, c.Y + r * x.Y, c.Z + r * x.Z));
+                    pts.Add(new Point3d(c.X - r * x.X, c.Y - r * x.Y, c.Z - r * x.Z));
+                    pts.Add(new Point3d(c.X + r * y.X, c.Y + r * y.Y, c.Z + r * y.Z));
+                    pts.Add(new Point3d(c.X - r * y.X, c.Y - r * y.Y, c.Z - r * y.Z));
                     break;
                 }
             }
