@@ -56,13 +56,34 @@ public static class CreateBlockTool
         "需要 length/width/height 与 unit；可选 origin_x/origin_y/origin_z 指定角点原点（毫米，默认 0,0,0）。" +
         "仅当用户明确要求创建长方体时调用；调用后需要用户在界面上确认才会执行。";
 
-    /// <summary>Builds a registry preloaded with create_block (the only Phase 2 tool).</summary>
+    /// <summary>Builds a registry preloaded with all Phase 2/3/4 geometry tools.</summary>
     public static ToolRegistry CreateRegistry() => CreateRegistryWithDefaults();
 
     internal static ToolRegistry CreateRegistryWithDefaults()
     {
         var registry = new ToolRegistry();
         registry.Register(new ToolDefinition(Name, Description, ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateCylinderTool.Name, CreateCylinderTool.Description,
+            CreateCylinderTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateConeTool.Name, CreateConeTool.Description,
+            CreateConeTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateSphereTool.Name, CreateSphereTool.Description,
+            CreateSphereTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateSketchTool.Name, CreateSketchTool.Description,
+            CreateSketchTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateExtrudeTool.Name, CreateExtrudeTool.Description,
+            CreateExtrudeTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateRevolveTool.Name, CreateRevolveTool.Description,
+            CreateRevolveTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            BooleanOperationTool.Name, BooleanOperationTool.Description,
+            BooleanOperationTool.ParametersJsonSchema));
         return registry;
     }
 }

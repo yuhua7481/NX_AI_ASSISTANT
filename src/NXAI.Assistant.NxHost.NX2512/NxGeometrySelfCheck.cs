@@ -1,0 +1,645 @@
+using NXAI.Assistant.Core;
+using NXOpen;
+using NXOpen.UF;
+
+namespace NXAI.Assistant.NxHost.NX2512;
+
+/// <summary>
+/// In-process NX geometry self-check (Phase 8-C): runs the core modeling
+/// scenarios against a DEDICATED temporary part created via the verified
+/// PartCollection.FileNew() API — never against the user's current work
+/// part — and produces a structured report.
+///
+/// API notes (verified against the local NX2512 assembly metadata and
+/// NXOpen.xml): PartCollection.FileNew() → FileNew builder (TemplateFileName,
+/// Units, NewFileName, MakeDisplayedPart) whose Commit creates and makes
+/// displayed the new part; BasePart.Close(CloseWholeTree, CloseModified,
+/// PartCloseResponses) closes it. The temp part is created UNSAVED and
+/// closed without saving — no user file is touched, nothing is auto-saved.
+///
+/// Every case states its input, expected geometry, actual result and failure
+/// stage. A case passes only on verified geometry; when shape-type
+/// confirmation (e.g. torus vs cylinder with the same bbox) is not
+/// available offline, the case reports "verified=geometry-bounds" and the
+/// shape-type line stays an explicit live-acceptance item.
+/// </summary>
+public sealed class NxGeometrySelfCheck
+{
+    private readonly NxToolExecutor _executor;
+
+    public NxGeometrySelfCheck(NxToolExecutor executor) => _executor = executor;
+
+    public sealed record CaseResult(
+        string Name,
+        bool Passed,
+        string Stage,
+        string Input,
+        string Expected,
+        string Actual,
+        string? Error);
+
+    public sealed class SelfCheckException : Exception
+    {
+        public SelfCheckException(string message, Exception? inner = null) : base(message, inner) { }
+    }
+
+    /// <summary>Runs all self-check cases in a fresh temporary part.
+    ///
+    /// Phase 8.1.6: the part-creation strategy is SEED-PART-FIRST. FileNew
+    /// is structurally unusable in this session (430 registered templates —
+    /// including NX's own "空白" — all rejected with "选定的模板不存在",
+    /// live-verified), so the primary path copies a KNOWN-GOOD millimeter
+    /// seed part to %TEMP% and opens the COPY via the verified
+    /// PartCollection.OpenDisplay API; the seed file itself is never
+    /// touched, and the copy is closed without saving and deleted. FileNew
+    /// remains as a fallback candidate for installs where it works.</summary>
+    public GeometrySelfCheckReport RunAll()
+    {
+        var session = Session.GetSession();
+        var originalWorkPart = session.Parts.Work;
+        var originalDisplayed = session.Parts.Display;
+
+        Part? tempPart = null;
+        string? tempCopyPath = null;
+        var cases = new List<CaseResult>();
+        string partIdentity = "（临时部件创建失败）";
+        try
+        {
+            (tempPart, tempCopyPath) = CreateTempPart(session);
+            partIdentity = $"{tempPart.Name}（自检副本，单位 {tempPart.PartUnits}）";
+            session.Parts.SetWork(tempPart);
+
+            cases.Add(CheckXyCircleExtrude(tempPart));
+            cases.Add(CheckXzCircleRevolveTorus(tempPart));
+            cases.Add(CheckPrimitives(tempPart));
+            cases.Add(CheckStaleReferenceRefusal(tempPart));
+        }
+        catch (Exception ex)
+        {
+            cases.Add(new CaseResult("selfcheck.setup", false, "setup",
+                "创建隔离临时部件", "临时部件可用", "创建失败", $"{ex.GetType().Name}: {ex.Message}"));
+        }
+        finally
+        {
+            // Close the temp part WITHOUT saving. CloseModified.CloseModified
+            // keeps closing even though unsaved changes exist — that is the
+            // point: the self-check must never persist anything.
+            try
+            {
+                if (tempPart != null)
+                    tempPart.Close(BasePart.CloseWholeTree.True, BasePart.CloseModified.CloseModified,
+                        null!);
+            }
+            catch (Exception closeEx)
+            {
+                cases.Add(new CaseResult("selfcheck.cleanup", false, "cleanup",
+                    "关闭临时部件", "关闭且不保存", "关闭失败", closeEx.Message));
+            }
+
+            // Delete the %TEMP% copy of the seed part (seed file untouched).
+            try
+            {
+                if (tempCopyPath != null && File.Exists(tempCopyPath))
+                    File.Delete(tempCopyPath);
+            }
+            catch (Exception deleteEx)
+            {
+                cases.Add(new CaseResult("selfcheck.cleanup.copy", false, "cleanup",
+                    "删除临时副本", "副本已删除", "删除失败", deleteEx.Message));
+            }
+
+            // Restore the user's part as displayed/work.
+            try
+            {
+                if (originalDisplayed != null)
+                    session.Parts.SetDisplay(originalDisplayed, true, false, out _);
+                if (originalWorkPart != null)
+                    session.Parts.SetWork(originalWorkPart);
+            }
+            catch
+            {
+                // best-effort restore; report via a case
+                cases.Add(new CaseResult("selfcheck.restore", false, "cleanup",
+                    "恢复用户工作部件", "工作部件还原", "还原失败", null));
+            }
+        }
+
+        return new GeometrySelfCheckReport(
+            partIdentity,
+            cases.All(c => c.Passed),
+            cases.Count(c => c.Passed),
+            cases.Count(c => !c.Passed),
+            cases.Select(c => new GeometrySelfCheckCase(
+                c.Name, c.Passed, c.Stage, c.Input, c.Expected, c.Actual, c.Error)).ToList());
+    }
+
+    /// <summary>
+    /// Discovers a millimeter modeling template for the self-check part.
+    /// Never a hardcoded name: candidate template directories come from the
+    /// NX environment (UGII_TEMPLATE_DIR when defined, else the install's
+    /// UGII\templates resolved from the running session's base dir), the
+    /// candidates are validated for existence, and preference is given to
+    /// model-plain metric templates (name contains "model-plain" and "-mm-")
+    /// whose units match by file naming convention. Returns the absolute
+    /// path of the first existing candidate.
+    /// </summary>
+    internal static string DiscoverMillimeterTemplate(out string searchedDirectories)
+    {
+        var directories = new List<string>();
+        var envTemplateDir = Environment.GetEnvironmentVariable("UGII_TEMPLATE_DIR");
+        if (!string.IsNullOrWhiteSpace(envTemplateDir) && Directory.Exists(envTemplateDir))
+            directories.Add(envTemplateDir);
+
+        // Session base dir: the running NX install (UGII root's parent).
+        try
+        {
+            var sessionBaseDir = Session.GetSession()
+                .GetEnvironmentVariableValue("UGII_BASE_DIR");
+            if (!string.IsNullOrWhiteSpace(sessionBaseDir))
+            {
+                var templateDir = Path.Combine(sessionBaseDir, "UGII", "templates");
+                if (Directory.Exists(templateDir) &&
+                    !directories.Contains(templateDir, StringComparer.OrdinalIgnoreCase))
+                {
+                    directories.Add(templateDir);
+                }
+            }
+        }
+        catch
+        {
+            // Env var unavailable: directory list stays as-is.
+        }
+
+        searchedDirectories = directories.Count > 0
+            ? string.Join("；", directories)
+            : "（未找到任何模板目录：UGII_TEMPLATE_DIR 未定义且 UGII_BASE_DIR 不可用）";
+
+        var preferred = new[] { "model-plain-1-mm-template.prt", "model-plain-mm-template.prt" };
+        foreach (var dir in directories)
+        {
+            foreach (var name in preferred)
+            {
+                var candidate = Path.Combine(dir, name);
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+            // Fallback: any *-mm-template.prt under the directory whose name
+            // marks millimeters (never guessing units from arbitrary names).
+            var mmCandidates = Directory.GetFiles(dir, "*-mm-template.prt");
+            if (mmCandidates.Length > 0)
+                return mmCandidates[0];
+        }
+        throw new SelfCheckException(
+            "未找到可用的毫米建模模板。" +
+            $"已搜索目录：{searchedDirectories}。" +
+            "请确认 NX2512 安装完整（UGII/templates 下应存在 model-plain-*-mm-template.prt）。");
+    }
+
+    /// <summary>
+    /// Creates the self-check part. Phase 8.1.6, SEED-PART-FIRST: FileNew is
+    /// structurally unusable in the live session (430 registered templates —
+    /// including NX's own "空白" blank entry — all rejected with "选定的模板
+    /// 不存在"; live-verified). Primary path: copy a KNOWN-GOOD millimeter
+    /// seed part to %TEMP% and open the COPY via the verified
+    /// PartCollection.OpenDisplay; the seed file is never touched, the copy
+    /// is closed without saving and deleted. Seed locations, in order:
+    ///   1. NXAI_SELFCHECK_SEED_PART environment variable (absolute .prt path);
+    ///   2. the plugin's own directory (next to the deployed DLLs),
+    ///      selfcheck/seed-mm.prt;
+    ///   3. %TEMP%/nxai_selfcheck_seed_mm.prt.
+    /// Fallback: the FileNew path from 8.1.2/8.1.4 (kept for installs where
+    /// the template registry works). Every failure names its stage.
+    /// </summary>
+    private static (Part Part, string? CopyPath) CreateTempPart(Session session)
+    {
+        // --- primary: seed-part copy ---
+        var seedLocations = new List<string>();
+        var envSeed = Environment.GetEnvironmentVariable("NXAI_SELFCHECK_SEED_PART");
+        if (!string.IsNullOrWhiteSpace(envSeed))
+            seedLocations.Add(envSeed);
+        try
+        {
+            // The plugin DLL directory (where NxHost is deployed).
+            var assemblyDir = Path.GetDirectoryName(typeof(NxGeometrySelfCheck).Assembly.Location);
+            if (!string.IsNullOrEmpty(assemblyDir))
+                seedLocations.Add(Path.Combine(assemblyDir, "selfcheck", "seed-mm.prt"));
+        }
+        catch
+        {
+            // assembly location unavailable: skip this candidate
+        }
+        seedLocations.Add(Path.Combine(Path.GetTempPath(), "nxai_selfcheck_seed_mm.prt"));
+
+        foreach (var seed in seedLocations)
+        {
+            if (string.IsNullOrWhiteSpace(seed) || !File.Exists(seed))
+                continue;
+
+            var copyPath = Path.Combine(
+                Path.GetTempPath(),
+                $"nxai_selfcheck_copy_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..8]}.prt");
+            try
+            {
+                File.Copy(seed, copyPath, overwrite: true);
+                PhaseLog.Write("selfcheck.setup",
+                    $"seed copy: {seed} -> {copyPath}");
+                var loaded = session.Parts.OpenDisplay(copyPath, out var loadStatus);
+                if (loaded == null)
+                {
+                    PhaseLog.Write("selfcheck.setup",
+                        "OpenDisplay returned null");
+                    File.Delete(copyPath);
+                    continue;
+                }
+                if (loaded.PartUnits != BasePart.Units.Millimeters)
+                    throw new SelfCheckException($"种子部件副本单位是 {loaded.PartUnits}，预期毫米。");
+                PhaseLog.Write("selfcheck.setup", $"temp part opened: {loaded.Name}");
+                return (loaded, copyPath);
+            }
+            catch (SelfCheckException)
+            {
+                try { if (File.Exists(copyPath)) File.Delete(copyPath); } catch { }
+                throw;
+            }
+            catch (Exception ex)
+            {
+                PhaseLog.Write("selfcheck.setup",
+                    $"seed candidate {seed} FAILED: {ex.GetType().Name}: {ex.Message}");
+                try { if (File.Exists(copyPath)) File.Delete(copyPath); } catch { }
+                // Try the next seed location.
+            }
+        }
+
+        // --- fallback: FileNew (8.1.2/8.1.4 contract) ---
+        PhaseLog.Write("selfcheck.setup",
+            "seed part not found in any location; falling back to FileNew");
+        try
+        {
+            var part = CreateTempPartViaFileNew(session);
+            return (part, null);
+        }
+        catch (SelfCheckException ex)
+        {
+            throw new SelfCheckException(
+                ex.Message +
+                " 【种子部件方案亦不可用：请在以下任一位置放置一个毫米制空部件：" +
+                string.Join("；", seedLocations) +
+                "。可用 NX 手工新建一个毫米模型部件并另存为该文件名。】", ex);
+        }
+    }
+
+    /// <summary>FileNew fallback (8.1.2/8.1.4 contract, kept verbatim).</summary>
+    private static Part CreateTempPartViaFileNew(Session session)
+    {
+        // Cross-check only: the on-disk mm template (diagnostic context).
+        var templatePath = DiscoverMillimeterTemplate(out string searchedDirectories);
+        PhaseLog.Write("selfcheck.setup",
+            $"on-disk mm template (cross-check): {templatePath}（搜索过：{searchedDirectories}）");
+
+        FileNew? fileNew = null;
+        try
+        {
+            fileNew = session.Parts.FileNew();
+
+            // 1. Registered application names — what ApplicationName takes.
+            string[] applicationNames;
+            try
+            {
+                applicationNames = fileNew.GetApplicationNames();
+            }
+            catch (Exception ex)
+            {
+                throw new SelfCheckException(
+                    $"查询 NX 应用名失败：{ex.GetType().Name}: {ex.Message}", ex);
+            }
+            if (applicationNames.Length == 0)
+                throw new SelfCheckException("NX 未注册任何应用名（GetApplicationNames 为空）。");
+            foreach (var name in applicationNames)
+                PhaseLog.Write("selfcheck.setup", $"nx application: {name}");
+
+            // 2. The modeling application (doc: use these names verbatim).
+            var modelingApp = applicationNames
+                .FirstOrDefault(n => n.Contains("model", StringComparison.OrdinalIgnoreCase))
+                ?? applicationNames[0];
+            fileNew.ApplicationName = modelingApp;
+            PhaseLog.Write("selfcheck.setup", $"application chosen: {modelingApp}");
+
+            // 3. Templates available for the current builder state.
+            string[] availableTemplates;
+            try
+            {
+                availableTemplates = fileNew.GetAvailableTemplates();
+            }
+            catch (Exception ex)
+            {
+                throw new SelfCheckException(
+                    $"查询 NX 可用模板失败：{ex.GetType().Name}: {ex.Message}", ex);
+            }
+            if (availableTemplates.Length == 0)
+            {
+                throw new SelfCheckException(
+                    $"应用 {modelingApp} 下没有任何可用模板（GetAvailableTemplates 为空）。" +
+                    "请检查 customer defaults 的模板目录配置。");
+            }
+            foreach (var t in availableTemplates)
+                PhaseLog.Write("selfcheck.setup", $"nx template: {t}");
+
+            // 4. Candidate selection, ordered by live evidence:
+            //    a) model-plain-1-mm-template.prt — NX lists it AND it exists
+            //       on disk; the 8.1.2 failure with this name was caused by
+            //       the INCOMPLETE property set, since fixed.
+            //    b) any other listed "-mm-" template.
+            //    c) the "空白" (blank) entry NX lists — a blank part uses
+            //       customer defaults instead of a seed part.
+            var candidates = new List<(string Name, bool Blank)>();
+            var preferred = availableTemplates.FirstOrDefault(t =>
+                t.Equals("model-plain-1-mm-template.prt", StringComparison.OrdinalIgnoreCase));
+            if (preferred != null)
+                candidates.Add((preferred, false));
+            candidates.AddRange(availableTemplates
+                .Where(t => t.Contains("-mm-", StringComparison.OrdinalIgnoreCase) &&
+                            t != preferred)
+                .Select(t => (t, false)));
+            if (availableTemplates.Any(t => t == "空白"))
+                candidates.Add(("空白", true));
+            if (candidates.Count == 0)
+                candidates.Add((availableTemplates[0], false));
+
+            // 5. Try each candidate; each attempt gets a FRESH builder.
+            var attempts = new List<string>();
+            foreach (var (name, blank) in candidates)
+            {
+                FileNew? attempt = null;
+                try
+                {
+                    attempt = session.Parts.FileNew();
+                    attempt.ApplicationName = modelingApp;
+                    attempt.TemplateFileName = name;
+                    attempt.UseBlankTemplate = blank;
+                    attempt.Units = Part.Units.Millimeters;
+                    attempt.RelationType = "";
+                    attempt.UsesMasterModel = "No";
+                    attempt.TemplateType = FileNewTemplateType.Item;
+                    attempt.TemplatePresentationName = blank ? "" : "Model";
+                    attempt.ItemType = "";
+                    attempt.Specialization = "";
+                    attempt.SetCanCreateAltrep(false);
+                    attempt.NewFileName = Path.Combine(
+                        Path.GetTempPath(),
+                        $"nxai_selfcheck_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..8]}.prt");
+                    attempt.MasterFileName = "";
+                    attempt.MakeDisplayedPart = true;
+                    attempt.DisplayPartOption = DisplayPartOption.AllowAdditional;
+
+                    var created = attempt.Commit() as Part;
+                    if (created == null)
+                    {
+                        attempts.Add($"{name}: Commit 未返回部件");
+                        continue;
+                    }
+                    attempt.Destroy();
+                    attempt = null;
+                    if (created.PartUnits != BasePart.Units.Millimeters)
+                        throw new SelfCheckException($"临时部件单位是 {created.PartUnits}，预期毫米。");
+                    PhaseLog.Write("selfcheck.setup",
+                        $"temp part created via {(blank ? "blank" : name)}: {created.Name}");
+                    return created;
+                }
+                catch (SelfCheckException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    attempts.Add($"{name}: {ex.GetType().Name}: {ex.Message}");
+                    PhaseLog.Write("selfcheck.setup",
+                        $"attempt {name} FAILED: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    attempt?.Destroy();
+                }
+            }
+
+            throw new SelfCheckException(
+                "无法创建临时测试部件（所有模板候选均被 NX 拒绝）。" +
+                $"NX 报告的可用模板数：{availableTemplates.Length}。" +
+                $"尝试记录：{string.Join("；", attempts)}。");
+        }
+        catch (SelfCheckException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new SelfCheckException(
+                $"无法创建临时测试部件：{ex.GetType().Name}: {ex.Message}。" +
+                "（已改为向 NX 查询应用名与可用模板；异常含查询/提交的精确阶段。）", ex);
+        }
+        finally
+        {
+            fileNew?.Destroy();
+        }
+    }
+
+    // ------------------------------------------------------------ case A
+
+    private CaseResult CheckXyCircleExtrude(Part part)
+    {
+        const string input = "XY 平面圆形草图 d30 → 拉伸 50mm（法向）";
+        const string expected = "一个新实体，包围盒 (-15,-15,0)–(15,15,50)";
+        try
+        {
+            var sketch = _executor.ExecuteCreateSketch(
+                new CreateSketchParameters(SketchPlaneMode.WcsXY, SketchProfileType.Circle,
+                    0, 0, 30, 0, 0), null);
+            if (sketch.Status != ToolExecutionStatus.Success)
+                return Fail("caseA.sketch", input, expected, sketch.Message);
+
+            var sketchRef = ExtractRef(sketch.DetailsJson, "sketchRef");
+            if (sketchRef == null)
+                return Fail("caseA.sketch", input, expected, "结果缺少 sketchRef");
+
+            var extrude = _executor.ExecuteCreateExtrude(
+                new CreateExtrudeParameters(sketchRef, 50, ExtrudeDirection.Normal), null);
+            if (extrude.Status != ToolExecutionStatus.Success)
+                return Fail("caseA.extrude", input, expected, extrude.Message);
+
+            // Verify against the real part state: exactly 1 body, bbox match.
+            var verify = VerifySingleBodyBoundingBox(part, -15, -15, 0, 15, 15, 50);
+            if (!verify.Passed)
+                return Fail("caseA.verify", input, expected, verify.Reason);
+
+            return new CaseResult("caseA.sketch_extrude", true, "verified",
+                input, expected, verify.Actual, null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseA.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------ case B
+
+    private CaseResult CheckXzCircleRevolveTorus(Part part)
+    {
+        const string input = "XZ 平面 U=45 d10 圆形草图 → 绕绝对 Z 轴 360° 旋转";
+        const string expected = "一个新实体（圆环），包围盒 (-50,-50,-5)–(50,50,5)";
+        try
+        {
+            var sketch = _executor.ExecuteCreateSketch(
+                new CreateSketchParameters(SketchPlaneMode.WcsXZ, SketchProfileType.Circle,
+                    0, 0, 10, 45, 0), null);
+            if (sketch.Status != ToolExecutionStatus.Success)
+                return Fail("caseB.sketch", input, expected, sketch.Message);
+
+            var sketchRef = ExtractRef(sketch.DetailsJson, "sketchRef");
+            if (sketchRef == null)
+                return Fail("caseB.sketch", input, expected, "结果缺少 sketchRef");
+
+            var revolve = _executor.ExecuteCreateRevolve(
+                new CreateRevolveParameters(sketchRef, RevolveAxisMode.WcsZ, 360), null);
+            if (revolve.Status != ToolExecutionStatus.Success)
+                return Fail("caseB.revolve", input, expected, revolve.Message);
+
+            // Analytic torus envelope: circle center (45,0,0) r5 around Z →
+            // world bbox (-50,-50,-5)–(50,50,5). The box alone cannot prove
+            // torus (a cylinder r50 h10 has the same box); shape-type
+            // confirmation is a live-acceptance item and the report says so.
+            var verify = VerifySingleBodyBoundingBox(part, -50, -50, -5, 50, 50, 5);
+            if (!verify.Passed)
+                return Fail("caseB.verify", input, expected, verify.Reason);
+
+            return new CaseResult("caseB.sketch_revolve", true, "verified=geometry-bounds（形状类型待实机确认：torus vs 同包围盒圆柱）",
+                input, expected, verify.Actual, null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseB.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------ primitives
+
+    private CaseResult CheckPrimitives(Part part)
+    {
+        const string input = "长方体/圆柱/圆锥/球 各一";
+        const string expected = "四个新实体创建成功（自检部件内计数增量正确）";
+        try
+        {
+            int before = CountBodies(part);
+            var results = new[]
+            {
+                _executor.ExecuteCreateBlock(new CreateBlockParameters(200, 0, 0, 10, 10, 10, "mm"), null),
+                _executor.ExecuteCreateCylinder(new CreateCylinderParameters(230, 0, 0, 10, 10, "mm"), null),
+                _executor.ExecuteCreateCone(new CreateConeParameters(260, 0, 0, 10, 0, 10, "mm"), null),
+                _executor.ExecuteCreateSphere(new CreateSphereParameters(290, 0, 0, 10, "mm"), null),
+            };
+            var failed = results.FirstOrDefault(r => r.Status != ToolExecutionStatus.Success);
+            if (failed != null)
+                return Fail("caseC.primitives", input, expected, failed.Message);
+
+            int after = CountBodies(part);
+            if (after != before + 4)
+                return Fail("caseC.primitives", input, expected, $"实体数 {after}，预期 {before + 4}");
+
+            return new CaseResult("caseC.primitives", true, "verified", input, expected,
+                $"4 个基本体全部提交并验证", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseC.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------ stale ref
+
+    private CaseResult CheckStaleReferenceRefusal(Part part)
+    {
+        const string input = "对不存在的草图引用执行拉伸";
+        const string expected = "安全拒绝（PreconditionsChanged），不产生几何";
+        try
+        {
+            int before = CountBodies(part);
+            var result = _executor.ExecuteCreateExtrude(
+                new CreateExtrudeParameters("SKETCH_DOES_NOT_EXIST", 10, ExtrudeDirection.Normal), null);
+            int after = CountBodies(part);
+
+            if (result.Status != ToolExecutionStatus.PreconditionsChanged)
+                return Fail("caseD.stale", input, expected, $"状态 {result.Status}，预期 PreconditionsChanged");
+            if (after != before)
+                return Fail("caseD.stale", input, expected, "拒绝后实体数发生变化");
+
+            return new CaseResult("caseD.stale_refusal", true, "verified", input, expected,
+                "已安全拒绝且无几何变化", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseD.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------ helpers
+
+    private static (bool Passed, string Reason, string Actual) VerifySingleBodyBoundingBox(
+        Part part, double minX, double minY, double minZ, double maxX, double maxY, double maxZ)
+    {
+        // Snapshot-diff against the state before the case is impractical here
+        // (bodies accumulate across cases in the temp part), so verify by
+        // locating ANY body whose bbox matches the expectation within 0.01mm.
+        var ufSession = UFSession.GetUFSession();
+        double[] box = new double[6];
+        foreach (object item in part.Bodies)
+        {
+            if (item is not Body body)
+                continue;
+            try
+            {
+                ufSession.Modl.AskBoundingBox(body.Tag, box);
+            }
+            catch
+            {
+                continue;
+            }
+            const double tol = 0.01;
+            if (Math.Abs(box[0] - minX) <= tol && Math.Abs(box[1] - minY) <= tol &&
+                Math.Abs(box[2] - minZ) <= tol && Math.Abs(box[3] - maxX) <= tol &&
+                Math.Abs(box[4] - maxY) <= tol && Math.Abs(box[5] - maxZ) <= tol)
+            {
+                return (true, "", $"包围盒匹配 ({box[0]:F3},{box[1]:F3},{box[2]:F3})–({box[3]:F3},{box[4]:F3},{box[5]:F3})");
+            }
+        }
+        return (false, $"未找到包围盒为 ({minX},{minY},{minZ})–({maxX},{maxY},{maxZ}) 的实体", "");
+    }
+
+    private static int CountBodies(Part part)
+    {
+        int count = 0;
+        foreach (object _ in part.Bodies)
+            count++;
+        return count;
+    }
+
+    private static string? ExtractRef(string? detailsJson, string key)
+    {
+        if (string.IsNullOrWhiteSpace(detailsJson))
+            return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(detailsJson);
+            if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                doc.RootElement.TryGetProperty(key, out var element) &&
+                element.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                return element.GetString();
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+        return null;
+    }
+
+    private static CaseResult Fail(string name, string input, string expected, string error) =>
+        new(name, false, "failed", input, expected, "", error);
+}

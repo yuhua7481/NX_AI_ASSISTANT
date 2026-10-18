@@ -1,0 +1,74 @@
+﻿{
+    "mode":  "Offline",
+    "startedAtUtc":  "2026-10-17T11:46:23.2251513Z",
+    "finishedAtUtc":  "2026-10-17T11:49:28.5796334Z",
+    "gitHead":  "a81bd724de8625ecdeb01820327e1f0d56816b07",
+    "gitBranch":  "recovery/pre-review-20261014-234252",
+    "gitDirtyFiles":  7,
+    "buildConfiguration":  "Release",
+    "summary":  {
+                    "total":  8,
+                    "passed":  8,
+                    "failed":  0,
+                    "skipped":  0,
+                    "notExecutable":  0
+                },
+    "checks":  [
+                   {
+                       "id":  "build.release",
+                       "category":  "build",
+                       "status":  "Passed",
+                       "detail":  "warnings= errors=",
+                       "log":  "D:\\AI\\NX_AI_ASSISTANT\\artifacts\\acceptance\\logs\\build.log"
+                   },
+                   {
+                       "id":  "test.full",
+                       "category":  "test",
+                       "status":  "Passed",
+                       "detail":  "total=? passed=? failed=? skipped=?",
+                       "log":  "D:\\AI\\NX_AI_ASSISTANT\\artifacts\\acceptance\\logs\\test.log"
+                   },
+                   {
+                       "id":  "git.diffcheck",
+                       "category":  "git",
+                       "status":  "Passed",
+                       "detail":  "no whitespace errors",
+                       "log":  "D:\\AI\\NX_AI_ASSISTANT\\artifacts\\acceptance\\logs\\diffcheck.log"
+                   },
+                   {
+                       "id":  "arch.core-nxopen-free",
+                       "category":  "architecture",
+                       "status":  "Passed",
+                       "detail":  "csproj 0 refs; 0 usings across 29 files",
+                       "log":  "D:\\AI\\NX_AI_ASSISTANT\\artifacts\\acceptance\\logs\\architecture.log"
+                   },
+                   {
+                       "id":  "arch.no-save-paths",
+                       "category":  "architecture",
+                       "status":  "Passed",
+                       "detail":  "no Save/SaveAs calls in executors",
+                       "log":  "D:\\AI\\NX_AI_ASSISTANT\\artifacts\\acceptance\\logs\\architecture.log"
+                   },
+                   {
+                       "id":  "consistency.registry",
+                       "category":  "consistency",
+                       "status":  "Passed",
+                       "detail":  "8 tools registered",
+                       "log":  ""
+                   },
+                   {
+                       "id":  "consistency.allowlist",
+                       "category":  "consistency",
+                       "status":  "Passed",
+                       "detail":  "allowlist entries \u003e= 8",
+                       "log":  ""
+                   },
+                   {
+                       "id":  "deploy.hashmatch",
+                       "category":  "deploy",
+                       "status":  "Passed",
+                       "detail":  "4/4 DLLs match build outputs",
+                       "log":  ""
+                   }
+               ]
+}

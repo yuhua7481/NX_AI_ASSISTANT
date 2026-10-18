@@ -47,11 +47,21 @@ public sealed class ChatSessionController : IDisposable
     public const int DefaultMaxOutboundMessages = 20;
 
     /// <summary>
-    /// Model responses allowed per user turn: response 1 may request a tool
-    /// call (which is confirmed and executed at most once), response 2 is the
-    /// final text reply and may not trigger execution.
+    /// Model responses allowed per user turn. Phase 7.3.2: the cap now
+    /// covers a limited serial chain — response 1 may request a tool call
+    /// (e.g. create_sketch), response 2 another single tool call fed the
+    /// first tool's real result (e.g. create_extrude with the controlled
+    /// sketch reference), response 3 is the final text reply and may not
+    /// trigger execution. Every round still executes at most ONE tool,
+    /// strictly serially (each awaits the previous tool's real result),
+    /// through the same registry/parser/authorization path. The cap keeps
+    /// the chain finite — a longer workflow requires another user turn.
     /// </summary>
-    public const int MaxModelResponsesPerTurn = 2;
+    public const int MaxModelResponsesPerTurn = 3;
+
+    /// <summary>Modeling executions allowed per user turn (the serial chain
+    /// length). Round gating guarantees at most this many executor calls.</summary>
+    public const int MaxToolExecutionsPerTurn = MaxModelResponsesPerTurn - 1;
 
     private readonly ModelService _modelService;
     private readonly ChatLog _chatLog;
@@ -61,6 +71,13 @@ public sealed class ChatSessionController : IDisposable
     private readonly INxToolExecutor? _toolExecutor;
     private readonly ToolConfirmationDelegate _confirmationHandler;
     private readonly ToolRegistry _toolRegistry;
+    private readonly Func<NxContextSnapshot?>? _contextProvider;
+    private readonly ExecutionModeManager? _modeManager;
+    private readonly ExecutionModePolicy _modePolicy = new();
+
+    /// <summary>Snapshot captured when the current turn started (null when no
+    /// provider is wired or capture failed). Consumed by face-relative tools.</summary>
+    public NxContextSnapshot? CurrentTurnContext { get; private set; }
 
     private CancellationTokenSource? _cts;
     private bool _inFlight;
@@ -79,7 +96,9 @@ public sealed class ChatSessionController : IDisposable
         ChatRequestDelegate? requestSender = null,
         int maxOutboundMessages = DefaultMaxOutboundMessages,
         INxToolExecutor? toolExecutor = null,
-        ToolConfirmationDelegate? confirmationHandler = null)
+        ToolConfirmationDelegate? confirmationHandler = null,
+        Func<NxContextSnapshot?>? contextProvider = null,
+        ExecutionModeManager? modeManager = null)
     {
         _modelService = modelService ?? throw new ArgumentNullException(nameof(modelService));
         _chatLog = chatLog ?? throw new ArgumentNullException(nameof(chatLog));
@@ -92,8 +111,10 @@ public sealed class ChatSessionController : IDisposable
         {
             throw new ArgumentException("启用工具执行器时必须提供确认回调。", nameof(confirmationHandler));
         }
+        _contextProvider = contextProvider;
         _confirmationHandler = confirmationHandler ?? ((_, _) =>
             Task.FromResult<ToolConfirmationDecision?>(null));
+        _modeManager = modeManager;
         _toolRegistry = toolExecutor != null
             ? CreateBlockTool.CreateRegistry()
             : new ToolRegistry();
@@ -109,6 +130,13 @@ public sealed class ChatSessionController : IDisposable
 
     /// <summary>True when a modeling executor is registered and tools are advertised to the model.</summary>
     public bool ToolsEnabled => _toolExecutor != null;
+
+    /// <summary>
+    /// The execution mode actually in effect at the backend dispatch stage
+    /// (Confirm when no manager was wired — the pre-Phase-6 behavior).
+    /// </summary>
+    public ExecutionMode CurrentExecutionMode =>
+        _modeManager?.CurrentMode ?? ExecutionMode.Confirm;
 
     /// <summary>
     /// Loads the configuration through the injected loader and applies it to the model
@@ -142,6 +170,18 @@ public sealed class ChatSessionController : IDisposable
         if (_detached || _inFlight || string.IsNullOrWhiteSpace(userText))
             return false;
 
+        // Capture the NX context snapshot before the request starts. The
+        // provider must run on the NX UI thread — StartSend is only called
+        // there (chat form input path), so a synchronous read is safe and
+        // keeps the snapshot consistent with what the user sees.
+        CurrentTurnContext = _contextProvider?.Invoke();
+        if (CurrentTurnContext is { } captured)
+        {
+            // Make visible what was actually captured this turn — a missing
+            // or empty selection must never fail silently.
+            _chatLog.Add(ChatRole.Info, DescribeCapturedContext(captured));
+        }
+
         _inFlight = true;
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -152,6 +192,19 @@ public sealed class ChatSessionController : IDisposable
         _ = RunRequestAsync(cts.Token).ContinueWith(
             static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
         return true;
+    }
+
+    /// <summary>
+    /// Runs the context provider once now (NX UI thread) and returns the
+    /// snapshot; also refreshes CurrentTurnContext so the next send uses it.
+    /// Null when no provider is configured or the provider reports nothing.
+    /// </summary>
+    public NxContextSnapshot? CaptureContextNow()
+    {
+        var snapshot = _contextProvider?.Invoke();
+        if (snapshot != null)
+            CurrentTurnContext = snapshot;
+        return snapshot;
     }
 
     /// <summary>Asks the in-flight request to abort; safe to call any time.</summary>
@@ -202,6 +255,18 @@ public sealed class ChatSessionController : IDisposable
     private async Task RunRequestAsync(CancellationToken cancellationToken)
     {
         var protocol = new List<OutboundMessage>(BuildOutboundMessages());
+        // Inject this turn's NX state as a clearly-labeled system message so
+        // the model knows the current selection/part context (state data, not
+        // user instructions). Kept only for this turn.
+        var turnContext = CurrentTurnContext;
+        if (turnContext != null)
+        {
+            var summary = turnContext.ToContextSummary();
+            if (summary.Length > 0)
+            {
+                protocol.Add(new OutboundMessage(OutboundMessage.RoleSystem, summary));
+            }
+        }
         string? finalText = null;
         string? errorText = null;
         var canceled = false;
@@ -210,10 +275,11 @@ public sealed class ChatSessionController : IDisposable
         {
             for (int round = 1; round <= MaxModelResponsesPerTurn; round++)
             {
-                // Tools are advertised only in round 1: the final round exists to
-                // let the model phrase the result, not to trigger more modeling.
+                // Tools are advertised while the chain still has execution
+                // budget; the final round exists to let the model phrase the
+                // accumulated results, not to trigger more modeling.
                 IReadOnlyList<ToolDefinition>? tools =
-                    round == 1 && ToolsEnabled ? _toolRegistry.All : null;
+                    round < MaxModelResponsesPerTurn && ToolsEnabled ? _toolRegistry.All : null;
 
                 var result = await _requestSender(protocol, tools, cancellationToken);
 
@@ -297,39 +363,223 @@ public sealed class ChatSessionController : IDisposable
         {
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.UnknownTool,
-                $"工具 {call.FunctionName} 未注册，本次请求未执行。当前可用工具：create_block。");
+                $"工具 {call.FunctionName} 未注册，本次请求未执行。当前可用工具：" +
+                string.Join("、", AutonomousToolAllowlist.Tools) + "。");
         }
 
-        if (call.FunctionName != CreateBlockTool.Name)
+        if (call.FunctionName != CreateBlockTool.Name &&
+            call.FunctionName != CreateCylinderTool.Name &&
+            call.FunctionName != CreateConeTool.Name &&
+            call.FunctionName != CreateSphereTool.Name &&
+            call.FunctionName != CreateSketchTool.Name &&
+            call.FunctionName != CreateExtrudeTool.Name &&
+            call.FunctionName != CreateRevolveTool.Name &&
+            call.FunctionName != BooleanOperationTool.Name)
         {
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.UnknownTool,
                 $"工具 {call.FunctionName} 没有对应的执行器，本次请求未执行。");
         }
 
-        var parser = new CreateBlockRequestParser();
-        var parameters = parser.ParseParameters(call.ArgumentsJson, out string? parseError);
-        if (parameters == null)
+        ToolConfirmationRequest request;
+        string requestDescription;
+        if (call.FunctionName == CreateBlockTool.Name)
         {
-            return CreateBlockExecutionResult.Failure(
-                ToolExecutionStatus.InvalidParameters,
-                $"参数校验未通过，未创建任何几何。{parseError}");
+            var blockParameters = new CreateBlockRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (blockParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            requestDescription =
+                $"长方体：长 {FormatNumber(blockParameters.Length)} × " +
+                $"宽 {FormatNumber(blockParameters.Width)} × 高 {FormatNumber(blockParameters.Height)} 毫米" +
+                (blockParameters.OriginX == 0 && blockParameters.OriginY == 0 && blockParameters.OriginZ == 0
+                    ? "，原点 (0, 0, 0)。"
+                    : $"，原点 ({FormatNumber(blockParameters.OriginX)}, {FormatNumber(blockParameters.OriginY)}, {FormatNumber(blockParameters.OriginZ)})。");
+            request = ToolConfirmationRequest.ForBlock(call.Id, call.FunctionName, blockParameters);
+        }
+        else if (call.FunctionName == CreateCylinderTool.Name)
+        {
+            var cylinderParameters = new CreateCylinderRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (cylinderParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            requestDescription =
+                $"圆柱体：直径 {FormatNumber(cylinderParameters.Diameter)} × " +
+                $"高 {FormatNumber(cylinderParameters.Height)} 毫米，轴向 +Z" +
+                (cylinderParameters.OriginX == 0 && cylinderParameters.OriginY == 0 && cylinderParameters.OriginZ == 0
+                    ? "，底面圆心 (0, 0, 0)。"
+                    : $"，底面圆心 ({FormatNumber(cylinderParameters.OriginX)}, {FormatNumber(cylinderParameters.OriginY)}, {FormatNumber(cylinderParameters.OriginZ)})。");
+            request = ToolConfirmationRequest.ForCylinder(call.Id, call.FunctionName, cylinderParameters);
+        }
+        else if (call.FunctionName == CreateConeTool.Name)
+        {
+            var coneParameters = new CreateConeRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (coneParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            string coneShape = coneParameters.TopDiameter > 0
+                ? $"圆台：底面直径 {FormatNumber(coneParameters.BaseDiameter)} × 顶部直径 {FormatNumber(coneParameters.TopDiameter)} × 高 {FormatNumber(coneParameters.Height)} 毫米"
+                : $"圆锥体：底面直径 {FormatNumber(coneParameters.BaseDiameter)} × 高 {FormatNumber(coneParameters.Height)} 毫米（锥顶收敛）";
+            requestDescription =
+                $"{coneShape}，轴向 +Z" +
+                (coneParameters.OriginX == 0 && coneParameters.OriginY == 0 && coneParameters.OriginZ == 0
+                    ? "，底面圆心 (0, 0, 0)。"
+                    : $"，底面圆心 ({FormatNumber(coneParameters.OriginX)}, {FormatNumber(coneParameters.OriginY)}, {FormatNumber(coneParameters.OriginZ)})。");
+            request = ToolConfirmationRequest.ForCone(call.Id, call.FunctionName, coneParameters);
+        }
+        else if (call.FunctionName == CreateSphereTool.Name)
+        {
+            var sphereParameters = new CreateSphereRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (sphereParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            requestDescription =
+                $"球体：直径 {FormatNumber(sphereParameters.Diameter)} 毫米" +
+                (sphereParameters.CenterX == 0 && sphereParameters.CenterY == 0 && sphereParameters.CenterZ == 0
+                    ? "，球心 (0, 0, 0)。"
+                    : $"，球心 ({FormatNumber(sphereParameters.CenterX)}, {sphereParameters.CenterY:F3}, {sphereParameters.CenterZ:F3})。");
+            request = ToolConfirmationRequest.ForSphere(call.Id, call.FunctionName, sphereParameters);
+        }
+        else if (call.FunctionName == CreateSketchTool.Name)
+        {
+            var sketchParameters = new CreateSketchRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (sketchParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            string profileText = sketchParameters.ProfileType == SketchProfileType.Rectangle
+                ? $"矩形 {FormatNumber(sketchParameters.RectangleWidth)} × {FormatNumber(sketchParameters.RectangleHeight)} 毫米"
+                : $"圆形直径 {FormatNumber(sketchParameters.CircleDiameter)} 毫米";
+            string planeText = sketchParameters.PlaneMode switch
+            {
+                SketchPlaneMode.SelectedPlane => "用户选中的平面/基准面",
+                SketchPlaneMode.WcsXY => "绝对坐标 XY 平面",
+                SketchPlaneMode.WcsXZ => "绝对坐标 XZ 平面",
+                _ => "绝对坐标 YZ 平面",
+            };
+            requestDescription =
+                $"草图：{profileText}，平面 {planeText}" +
+                (sketchParameters.CenterU == 0 && sketchParameters.CenterV == 0
+                    ? "，轮廓中心位于平面原点。"
+                    : $"，轮廓中心偏移 (u {FormatNumber(sketchParameters.CenterU)}, v {FormatNumber(sketchParameters.CenterV)}) 毫米（草图局部坐标）。");
+            request = ToolConfirmationRequest.ForSketch(call.Id, call.FunctionName, sketchParameters);
+        }
+        else if (call.FunctionName == CreateExtrudeTool.Name)
+        {
+            var extrudeParameters = new CreateExtrudeRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (extrudeParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            requestDescription =
+                $"拉伸：草图 {extrudeParameters.SketchRef}，距离 {FormatNumber(extrudeParameters.Distance)} 毫米，" +
+                $"{(extrudeParameters.Direction == ExtrudeDirection.Reverse ? "沿法向反向" : "沿草图法向")}。";
+            request = ToolConfirmationRequest.ForExtrude(call.Id, call.FunctionName, extrudeParameters);
+        }
+        else if (call.FunctionName == CreateRevolveTool.Name)
+        {
+            var revolveParameters = new CreateRevolveRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (revolveParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            string axisText = revolveParameters.AxisMode switch
+            {
+                RevolveAxisMode.SelectedAxis => "用户选中的直线/基准轴",
+                RevolveAxisMode.WcsX => "绝对坐标 X 轴",
+                RevolveAxisMode.WcsY => "绝对坐标 Y 轴",
+                _ => "绝对坐标 Z 轴",
+            };
+            requestDescription =
+                $"旋转体：草图 {revolveParameters.SketchRef}，轴 {axisText}，{FormatNumber(revolveParameters.AngleDeg)} 度。";
+            request = ToolConfirmationRequest.ForRevolve(call.Id, call.FunctionName, revolveParameters);
+        }
+        else
+        {
+            var booleanParameters = new BooleanOperationRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (booleanParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未修改任何几何。{parseError}");
+            }
+
+            string opText = booleanParameters.Operation switch
+            {
+                BooleanOperationType.Unite => "并集",
+                BooleanOperationType.Subtract => "差集",
+                _ => "交集",
+            };
+            requestDescription =
+                $"布尔{opText}：目标体 {booleanParameters.TargetBodyRef}，工具体 {booleanParameters.ToolBodyRef}" +
+                "（运算后工具体被消耗，结果归属目标体）。";
+            request = ToolConfirmationRequest.ForBoolean(call.Id, call.FunctionName, booleanParameters);
         }
 
-        _chatLog.Add(ChatRole.Info,
-            $"模型请求创建长方体：长 {FormatNumber(parameters.Length)} × " +
-            $"宽 {FormatNumber(parameters.Width)} × 高 {FormatNumber(parameters.Height)} 毫米" +
-            (parameters.OriginX == 0 && parameters.OriginY == 0 && parameters.OriginZ == 0
-                ? "，原点 (0, 0, 0)。"
-                : $"，原点 ({FormatNumber(parameters.OriginX)}, {FormatNumber(parameters.OriginY)}, {FormatNumber(parameters.OriginZ)})。") +
-            "等待你的确认。");
-
-        var request = new ToolConfirmationRequest
+        // Authorization decision at the backend dispatch stage — read the
+        // effective mode here, never from the UI. Confirm mode (and any
+        // tool not on the autonomous allowlist) always takes the existing
+        // confirmation path.
+        var effectiveMode = _modeManager?.CurrentMode ?? ExecutionMode.Confirm;
+        if (!_modePolicy.RequiresConfirmation(effectiveMode, call.FunctionName))
         {
-            ToolCallId = call.Id,
-            ToolName = call.FunctionName,
-            Parameters = parameters,
-        };
+            _chatLog.Add(ChatRole.Info, $"自主模式：正在创建{requestDescription}");
+            // Re-check just before mutating the model: a mode switch between
+            // the decision and this point must fall back to the confirmation
+            // flow — never straight into execution.
+            var recheckMode = _modeManager!.CurrentMode;
+            if (recheckMode != ExecutionMode.Autonomous)
+            {
+                _chatLog.Add(ChatRole.Info,
+                    "执行前检测到模式已切换回确认模式，本次操作需确认后才会执行。");
+            }
+            else if (_detached || cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+            else
+            {
+                return ExecuteConfirmedTool(request, expectedWorkPartFullPath: null);
+            }
+        }
+        else
+        {
+            _chatLog.Add(ChatRole.Info, $"模型请求创建{requestDescription}等待你的确认。");
+        }
+
         var decision = await _confirmationHandler(request, cancellationToken);
         if (decision == null)
         {
@@ -350,15 +600,105 @@ public sealed class ChatSessionController : IDisposable
             throw new OperationCanceledException(cancellationToken);
         }
 
-        return _toolExecutor!.ExecuteCreateBlock(parameters, decision.ExpectedWorkPartFullPath);
+        return ExecuteConfirmedTool(request, decision.ExpectedWorkPartFullPath);
     }
+
+    private CreateBlockExecutionResult ExecuteConfirmedTool(
+        ToolConfirmationRequest request, string? expectedWorkPartFullPath) =>
+        request.ParametersKind switch
+        {
+            ToolParametersKind.Block => _toolExecutor!.ExecuteCreateBlock(
+                request.BlockParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Cylinder => _toolExecutor!.ExecuteCreateCylinder(
+                request.CylinderParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Cone => _toolExecutor!.ExecuteCreateCone(
+                request.ConeParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Sphere => _toolExecutor!.ExecuteCreateSphere(
+                request.SphereParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Sketch => _toolExecutor!.ExecuteCreateSketch(
+                request.SketchParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Extrude => _toolExecutor!.ExecuteCreateExtrude(
+                request.ExtrudeParameters!, expectedWorkPartFullPath),
+            ToolParametersKind.Revolve => _toolExecutor!.ExecuteCreateRevolve(
+                request.RevolveParameters!, expectedWorkPartFullPath),
+            _ => _toolExecutor!.ExecuteBooleanOperation(
+                request.BooleanParameters!, expectedWorkPartFullPath),
+        };
 
     private static string FormatNumber(double value) =>
         value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>
+    /// One-line, user-facing summary of what the current turn's context
+    /// capture actually observed (selection count and types; for a single
+    /// planar face also its center and normal). Failures are stated as
+    /// failures — never silently omitted.
+    /// </summary>
+    internal static string DescribeCapturedContext(NxContextSnapshot snapshot)
+    {
+        switch (snapshot.Status)
+        {
+            case "no_active_part":
+                return "NX 上下文：当前没有活动工作部件。";
+            case "error":
+            {
+                var reason = snapshot.Unavailable.Count > 0
+                    ? snapshot.Unavailable[0]
+                    : $"状态 {snapshot.Status}";
+                return $"NX 上下文读取失败：{reason}";
+            }
+        }
+
+        var kindText = DescribeSelectionKinds(snapshot.Selection);
+        var head = snapshot.Selection.Count == 0
+            ? "NX 上下文：当前没有选中对象。"
+            : $"NX 上下文：已选择 {snapshot.Selection.Count} 个对象{kindText}。";
+
+        // When exactly one face with a full geometry summary was captured,
+        // surface its center/normal so the user can sanity-check the data the
+        // model will see (e.g. before a face-relative cylinder request).
+        var facesWithGeometry = snapshot.Selection
+            .Where(s => s.Kind == "face" && s.Face is { } f &&
+                f.CenterX is not null && f.CenterY is not null && f.CenterZ is not null &&
+                f.NormalX is not null && f.NormalY is not null && f.NormalZ is not null)
+            .ToList();
+        if (facesWithGeometry.Count == 1 && facesWithGeometry[0].Face is { } face)
+        {
+            head += $"\n面中心 ({Fmt(face.CenterX)}, {Fmt(face.CenterY)}, {Fmt(face.CenterZ)})，" +
+                    $"法向 ({Fmt(face.NormalX)}, {Fmt(face.NormalY)}, {Fmt(face.NormalZ)})";
+        }
+
+        if (snapshot.Unavailable.Count > 0)
+            head += $"\n未获取：{string.Join("；", snapshot.Unavailable.Take(2))}";
+        return head;
+    }
+
+    private static string Fmt(double? v) => v is { } d
+        ? d.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)
+        : "未知";
+
+    private static string DescribeSelectionKinds(IReadOnlyList<NxSelectionItem> selection)
+    {
+        if (selection.Count == 0)
+            return "";
+        var groups = selection
+            .GroupBy(s => s.Kind switch
+            {
+                "face" => s.Subtype != null ? $"面（{s.Subtype}）" : "面",
+                "body" => s.Body is { IsSheetBody: true } ? "片体" : "实体",
+                "curve" => s.Subtype ?? "曲线",
+                _ => s.Kind,
+            })
+            .Select(g => g.Count() == 1 ? $"1 个{g.Key}" : $"{g.Count()} 个{g.Key}");
+        return "（" + string.Join("、", groups) + "）";
+
+    }
+
+    /// <summary>
     /// Serializes the execution outcome for the model. Contains no secrets and
     /// no machine paths beyond the work part identity the user already sees.
+    /// Executor-provided DetailsJson (NXHost-managed references such as
+    /// sketchRef/newBodyRef) is merged into the top-level payload object.
     /// </summary>
     internal static string BuildToolResultPayload(CreateBlockExecutionResult result)
     {
@@ -376,6 +716,25 @@ public sealed class ChatSessionController : IDisposable
                 ["width"] = result.VerifiedWidthMm ?? 0,
                 ["height"] = result.VerifiedHeightMm ?? 0,
             };
+        }
+        if (!string.IsNullOrWhiteSpace(result.DetailsJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(result.DetailsJson);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var property in doc.RootElement.EnumerateObject())
+                    {
+                        payload[property.Name] = JsonSerializer.Deserialize<object>(property.Value.GetRawText());
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // Malformed details are never sent; the core fields above
+                // remain the source of truth.
+            }
         }
         return JsonSerializer.Serialize(payload);
     }

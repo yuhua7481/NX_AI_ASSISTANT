@@ -1,3 +1,4 @@
+using NXAI.Assistant.Core;
 using NXAI.Assistant.UI;
 
 namespace NXAI.Assistant.NxHost.NX2512;
@@ -24,7 +25,33 @@ public static class NxHostBoot
             return;
         }
 
-        _chatForm = new AssistantChatForm(new NxSessionReader(), new NxToolExecutor());
+        var contextReader = new NxContextReader();
+        var selfCheck = new NxGeometrySelfCheck(new NxToolExecutor());
+        _chatForm = new AssistantChatForm(
+            new NxSessionReader(), new NxToolExecutor(),
+            contextProvider: () =>
+            {
+                try
+                {
+                    return contextReader.Capture();
+                }
+                catch (Exception ex)
+                {
+                    // Context capture must never break the chat flow; a null
+                    // snapshot simply means no NX context was injected. The
+                    // failure reason is logged so missing context is visible.
+                    PhaseLog.Write("context.capture",
+                        $"FAILED provider: {ex.GetType().Name}: {ex.Message}");
+                    return null;
+                }
+            },
+            geometrySelfCheck: () =>
+            {
+                var report = selfCheck.RunAll();
+                PhaseLog.Write("selfcheck",
+                    $"{report.PassedCount} passed / {report.FailedCount} failed in {report.PartIdentity}");
+                return report;
+            });
         _chatForm.Show();
     }
 }
