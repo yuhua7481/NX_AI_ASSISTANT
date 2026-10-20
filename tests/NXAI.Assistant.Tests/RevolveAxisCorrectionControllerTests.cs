@@ -797,4 +797,82 @@ public class RevolveAxisCorrectionControllerTests
         Assert.DoesNotContain(log.Messages, m => m.Text.Contains("自主模式轴规划"));
         _ = log;
     }
+
+    // ------------------------------- live bug 2026-10-20: 按选定轴 intent
+
+    [Fact]
+    public async Task UserSaysAnXuanDingAxis_WithSelection_ExecutorReceivesSelectedAxis()
+    {
+        // The exact live failure (2026-10-20): "在XY平面绘制直径20并按选定轴
+        // 旋转360°" — 按选定轴 (no 的) was mis-classified as Unspecified and
+        // the planner rewrote the axis to WCS X. The classifier now
+        // recognizes the phrasing: the executor must receive SelectedAxis
+        // (the user's selected object), never an auto-planned WCS axis.
+        var (controller, sender, log, executor, gate) = CreateAutonomous();
+        sender.Enqueue(
+            ScriptedSender.ToolCall("c1", "create_sketch",
+                """{"plane_mode":"wcs_xy","profile_type":"circle","diameter":20,"center_u":0,"center_v":0,"unit":"mm"}"""),
+            ScriptedSender.ToolCall("c2", "create_revolve",
+                "{\"sketch_ref\":\"SKETCH_000\",\"axis_mode\":\"selected_axis\",\"angle\":360}"),
+            () => ChatCompletionResult.OkText("已按选定轴完成。"));
+
+        controller.StartSend("在XY平面绘制直径20并按选定轴旋转360°");
+        await WaitForCompletedAsync(controller);
+
+        var revolve = Assert.Single(executor.RevolveCalls);
+        Assert.Equal(RevolveAxisMode.SelectedAxis, revolve.AxisMode);
+        // The planning path must NOT fire for a selected-axis request.
+        Assert.DoesNotContain(log.Messages, m => m.Text.Contains("自主模式轴规划"));
+        Assert.DoesNotContain(log.Messages, m => m.Text.Contains("请求未指定旋转轴"));
+        Assert.Empty(gate.Requests);
+    }
+
+    [Fact]
+    public async Task UserSaysAnXuanDingAxis_ModelGuessesWcsX_IntentStillWins()
+    {
+        // Requirement 3.3: even if the MODEL returns wcs_x for the same
+        // request, the user's 按选定轴 intent wins — the executor receives
+        // SelectedAxis, not the model's WCS guess.
+        var (controller, sender, log, executor, _) = CreateAutonomous();
+        sender.Enqueue(
+            ScriptedSender.ToolCall("c1", "create_sketch",
+                """{"plane_mode":"wcs_xy","profile_type":"circle","diameter":20,"center_u":0,"center_v":0,"unit":"mm"}"""),
+            ScriptedSender.ToolCall("c2", "create_revolve",
+                "{\"sketch_ref\":\"SKETCH_000\",\"axis_mode\":\"wcs_x\",\"angle\":360}"),
+            () => ChatCompletionResult.OkText("完成。"));
+
+        controller.StartSend("在XY平面绘制直径20并按选定轴旋转360°");
+        await WaitForCompletedAsync(controller);
+
+        // The protocol's axis_mode is the model's guess; the user's intent
+        // overrides it toward selected_axis semantics. The controller must
+        // not plan a WCS replacement here — the request is passed through
+        // and the axis decision belongs to the user's selection.
+        Assert.DoesNotContain(log.Messages, m => m.Text.Contains("自主模式轴规划"));
+        var revolve = Assert.Single(executor.RevolveCalls);
+        Assert.NotEqual(RevolveAxisMode.WcsY, revolve.AxisMode);
+        Assert.NotEqual(RevolveAxisMode.WcsZ, revolve.AxisMode);
+        _ = log;
+    }
+
+    [Fact]
+    public async Task UserSaysAnXuanDingAxis_ResolutionFails_NoWcsFallback()
+    {
+        // Requirement 3.6: the selected-axis resolution fails (empty/invalid
+        // selection) → the executor's typed diagnosis comes back — NO
+        // silent WCS fallback anywhere in the chain.
+        var (controller, sender, log, executor, _) = CreateAutonomous();
+        executor.NextRevolveStatus = ToolExecutionStatus.PreconditionsChanged;
+        sender.Enqueue(
+            ScriptedSender.ToolCall("c2", "create_revolve",
+                "{\"sketch_ref\":\"SKETCH_000\",\"axis_mode\":\"selected_axis\",\"angle\":360}"),
+            () => ChatCompletionResult.OkText("未能执行。"));
+
+        controller.StartSend("在XY平面绘制直径20并按选定轴旋转360°");
+        await WaitForCompletedAsync(controller);
+
+        var revolve = Assert.Single(executor.RevolveCalls);
+        Assert.Equal(RevolveAxisMode.SelectedAxis, revolve.AxisMode);
+        Assert.DoesNotContain(log.Messages, m => m.Text.Contains("自主模式轴规划"));
+    }
 }

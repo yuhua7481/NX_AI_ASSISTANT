@@ -270,6 +270,42 @@ public class RevolveAxisAdvisorTests
             RevolveAxisAdvisor.IsAxisExplicitlySpecified(text));
     }
 
+    // --------------------------------- live bug 2026-10-20: 按选定轴 variants
+
+    [Theory]
+    [InlineData("在XY平面绘制直径20并按选定轴旋转360°")]           // the live failure (no 的)
+    [InlineData("按选定轴旋转")]
+    [InlineData("按已选轴旋转")]
+    [InlineData("按我选定的轴旋转")]
+    [InlineData("按选中的轴旋转")]
+    [InlineData("按选择的直线旋转")]
+    [InlineData("使用我选中的直线作为旋转轴")]
+    [InlineData("使用当前选择的基准轴旋转")]
+    [InlineData("selected_axis")]
+    public void ClassifyAxisIntent_SelectedAxisVariants_AllRecognized(string text)
+    {
+        // Requirement 1: every established Chinese phrasing for "use my
+        // selected object as the rotation axis" classifies as
+        // UserNamedSelectedAxis — the live failure phrasing 按选定轴 (no 的)
+        // included. None may fall through to Unspecified (which lets the
+        // planner silently rewrite to a WCS axis) or to UserNamedAxis.
+        Assert.Equal(RevolveAxisAdvisor.AxisIntentKind.UserNamedSelectedAxis,
+            RevolveAxisAdvisor.ClassifyAxisIntent(text));
+    }
+
+    [Theory]
+    [InlineData("使用选定尺寸绘制草图然后绕轴旋转360度")]   // 选定 modifies 尺寸
+    [InlineData("按选定方式旋转")]
+    [InlineData("已选择毫米作为单位，绕轴旋转")]
+    public void ClassifyAxisIntent_UnrelatedSelectionUses_StayUnspecified(string text)
+    {
+        // Requirement 1: 选定/选择 describing OTHER objects (尺寸/方式/单位)
+        // must not be mistaken for a selected-axis decision — the object
+        // word (轴/直线/线) must directly follow the selection word.
+        Assert.Equal(RevolveAxisAdvisor.AxisIntentKind.Unspecified,
+            RevolveAxisAdvisor.ClassifyAxisIntent(text));
+    }
+
     [Fact]
     public void SelectedAxisMode_WithUnspecifiedIntent_ReturnsBestRankedCandidate()
     {

@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace NXAI.Assistant.Core;
 
 /// <summary>
@@ -79,8 +81,19 @@ public sealed record RevolveAxisAdvice(
 /// and EXPLAINS. Replacing the model's axis is a separate, logged decision
 /// made by the caller under an explicit mode policy.
 /// </summary>
-public static class RevolveAxisAdvisor
+public static partial class RevolveAxisAdvisor
 {
+    /// <summary>
+    /// Selected-object phrase pattern: a selection word (选中/选定/已选/选择),
+    /// an optional 的, an optional 基准 (the WHOLE word optional — 基准?
+    /// would wrongly make 基 mandatory), then the object word (轴/直线/线).
+    /// Matches 按选定轴 / 按我选定的轴 / 选中的基准轴 / 选择的直线 / 已选轴 —
+    /// and rejects 选定尺寸 (the object word must directly follow within the
+    /// tight window).
+    /// </summary>
+    [GeneratedRegex(@"(选中|选定|已选|选择)的?(基准)?(轴|直线|线)")]
+    private static partial Regex SelectedObjectPattern();
+
     /// <summary>
     /// Feasible candidates whose expected scale is within this factor of the
     /// best are considered comparable — no single geometric winner.
@@ -470,13 +483,17 @@ public static class RevolveAxisAdvisor
 
         // (2) Selected-object wording — checked FIRST: "按我选定的轴旋转"
         // names an object, not a coordinate axis, even though it contains
-        // the word 轴.
+        // the word 轴. Live gap (fixed 2026-10-20): "按选定轴旋转" (no 的)
+        // fell through to Unspecified and the planner silently rewrote the
+        // axis to a WCS candidate. One exact regex covers all established
+        // Chinese variants: a selection word (选中/选定/已选/选择), an
+        // optional 的, an optional 基准 (datum), then the object word
+        // (轴/直线/线). The tight adjacency prevents unrelated uses of
+        // 选定 (e.g. "选定尺寸…绕轴旋转") from matching, and no model call
+        // or NXOpen dependency is introduced.
         if (text.Contains("selected_axis"))
             return AxisIntentKind.UserNamedSelectedAxis;
-        if (text.Contains("选中") && (text.Contains("轴") || text.Contains("线") || text.Contains("直线")))
-            return AxisIntentKind.UserNamedSelectedAxis;
-        if (text.Contains("选定的轴") || text.Contains("选定的直线") ||
-            text.Contains("选择的轴") || text.Contains("选择的直线"))
+        if (SelectedObjectPattern().IsMatch(text))
             return AxisIntentKind.UserNamedSelectedAxis;
 
         // (1) Named absolute axes.
