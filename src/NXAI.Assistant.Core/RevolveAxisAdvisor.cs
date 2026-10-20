@@ -156,16 +156,6 @@ public static partial class RevolveAxisAdvisor
         }
     }
 
-    /// <summary>Minimal 3-vector for the advisor's planar math (the NXOpen
-    /// Vector3d type is not referenceable from Core).</summary>
-    public readonly record struct Vector(double X, double Y, double Z)
-    {
-        public double Dot(Vector o) => X * o.X + Y * o.Y + Z * o.Z;
-        public double Length => Math.Sqrt(X * X + Y * Y + Z * Z);
-        public static Vector operator +(Vector a, Vector b) => new(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
-        public static Vector operator -(Vector a, Vector b) => new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
-        public static Vector operator *(double s, Vector a) => new(s * a.X, s * a.Y, s * a.Z);
-    }
 
     /// <summary>
     /// Profile extent facts used for the distance ranking: the profile
@@ -545,4 +535,16 @@ public static partial class RevolveAxisAdvisor
         RevolveAxisMode.SelectedAxis => "用户选中的直线/基准轴",
         _ => mode.ToString(),
     };
+}
+
+/// <summary>Minimal 3-vector for Core modeling math (the NXOpen
+/// Vector3d type is not referenceable from Core). Shared by the axis
+/// advisor and the revolve envelope math.</summary>
+public readonly record struct Vector(double X, double Y, double Z)
+{
+    public double Dot(Vector o) => X * o.X + Y * o.Y + Z * o.Z;
+    public double Length => Math.Sqrt(X * X + Y * Y + Z * Z);
+    public static Vector operator +(Vector a, Vector b) => new(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
+    public static Vector operator -(Vector a, Vector b) => new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+    public static Vector operator *(double s, Vector a) => new(s * a.X, s * a.Y, s * a.Z);
 }

@@ -1516,6 +1516,7 @@ public sealed partial class NxToolExecutor
     {
         var geometry = sketch.GetAllGeometry();
         var pts = new List<Point3d>();
+        List<RevolveEnvelopeMath.CircleFacts>? circles = null;
         foreach (var g in geometry)
         {
             switch (g)
@@ -1526,19 +1527,30 @@ public sealed partial class NxToolExecutor
                     break;
                 case Arc arc:
                 {
-                    // Extreme points ON the arc's own plane (center ± r·xDir,
-                    // center ± r·yDir) — exactly the fixed ComputeProfileExtrudeAabb
-                    // approach. A box-corner set (c ± r in all three axes)
-                    // yields points off the circle's plane: for the XZ-plane
-                    // caseB circle it manufactured a Y=±5 point that inflated
-                    // the radial reach to sqrt(50²+5²)=50.249 and wrongly
-                    // rejected the correct torus after a successful commit
-                    // (live, 2026-10-18).
+                    // Full-circle arcs use the EXACT envelope math
+                    // (RevolveEnvelopeMath): for a non-axis-aligned axis the
+                    // true radial maximum sits at an arbitrary angle on the
+                    // circle — the four center±r·e1/±r·e2 sample points
+                    // underestimated maxR by ~2.9mm for a d20 circle with a
+                    // tilted selected line (live 2026-10-20 10:43, Z span
+                    // short by 5.7mm), wrongly rolling back the committed
+                    // body. Partial arcs (a0≠0 or a1≠2π) still use sample
+                    // points — they are not full sweeps.
+                    bool fullCircle = Math.Abs(Math.Abs(arc.EndAngle - arc.StartAngle) - 2 * Math.PI) < 1e-9;
                     double r = arc.Radius;
                     var c = arc.CenterPoint;
                     var m = arc.Matrix.Element;
                     var x = new Vector3d(m.Xx, m.Yx, m.Zx);
                     var y = new Vector3d(m.Xy, m.Yy, m.Zy);
+                    if (fullCircle)
+                    {
+                        circles ??= new List<RevolveEnvelopeMath.CircleFacts>();
+                        circles.Add(new RevolveEnvelopeMath.CircleFacts(
+                            new Vector(c.X, c.Y, c.Z), r,
+                            new Vector(x.X, x.Y, x.Z),
+                            new Vector(y.X, y.Y, y.Z)));
+                        break;
+                    }
                     pts.Add(new Point3d(c.X + r * x.X, c.Y + r * x.Y, c.Z + r * x.Z));
                     pts.Add(new Point3d(c.X - r * x.X, c.Y - r * x.Y, c.Z - r * x.Z));
                     pts.Add(new Point3d(c.X + r * y.X, c.Y + r * y.Y, c.Z + r * y.Z));
@@ -1546,6 +1558,20 @@ public sealed partial class NxToolExecutor
                     break;
                 }
             }
+        }
+
+        // A full-circle profile: the envelope comes entirely from the exact
+        // circle math (the circle is a closed curve — no additional points).
+        if (circles is { Count: 1 } && pts.Count == 0)
+        {
+            var cf = circles[0];
+            var envelope = RevolveEnvelopeMath.ComputeFullSweepEnvelope(
+                cf, new RevolveEnvelopeMath.AxisLine(
+                    new Vector(axisPoint.X, axisPoint.Y, axisPoint.Z),
+                    new Vector(u.X, u.Y, u.Z)));
+            PhaseLog.Write("execute.revolve",
+                $"envelope (exact circle math): maxR error ≤ {RevolveEnvelopeMath.MaxRadialError} mm");
+            return envelope;
         }
 
         double zMin = double.MaxValue, zMax = double.MinValue, maxR = 0;
