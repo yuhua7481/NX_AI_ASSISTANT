@@ -2034,6 +2034,13 @@ public sealed partial class NxToolExecutor
                 "create_sketch" => new[] { "SKETCH" },
                 "create_extrude" => new[] { "EXTRUDE" },
                 "create_revolve" => new[] { "REVOLVED" },
+                // Boolean results are committed as UNITE/SUBTRACT/INTERSECT
+                // features (live 2026-10-20: an INTERSECT committed then
+                // rolled back left the ledger unknown; the probe previously
+                // had no boolean mapping and returned "cannot judge" for
+                // EVERY boolean unknown state — the difference request was
+                // then permanently blocked). All three kinds count.
+                "boolean_operation" => new[] { "UNITE", "SUBTRACT", "INTERSECT" },
                 _ => Array.Empty<string>(),
             };
             if (featureTypes.Length == 0)
