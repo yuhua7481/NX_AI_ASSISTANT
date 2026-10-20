@@ -12,6 +12,15 @@ namespace NXAI.Assistant.NxHost.NX2512;
 public static class NxHostBoot
 {
     private static AssistantChatForm? _chatForm;
+    private static readonly object RegisterGate = new();
+    private static bool _teardownHookRegistered;
+
+    // Per-process ledger (approved design): instance-level, shared across
+    // chat-window rebuilds for the whole NX host lifetime. Created once here
+    // (NX process start) so a torn-down chat window cannot erase what its
+    // executor already did. Only holds tool names, plain-language summaries,
+    // statuses — never API keys or configuration.
+    private static readonly ModelingExecutionLedger SharedExecutionLedger = new();
 
     public static void ShowChatWindow()
     {
@@ -21,6 +30,7 @@ public static class NxHostBoot
             {
                 _chatForm.WindowState = FormWindowState.Normal;
             }
+            _chatForm.Show();
             _chatForm.Activate();
             return;
         }
@@ -29,6 +39,7 @@ public static class NxHostBoot
         var selfCheck = new NxGeometrySelfCheck(new NxToolExecutor());
         _chatForm = new AssistantChatForm(
             new NxSessionReader(), new NxToolExecutor(),
+            executionLedger: SharedExecutionLedger,
             contextProvider: () =>
             {
                 try
@@ -53,5 +64,40 @@ public static class NxHostBoot
                 return report;
             });
         _chatForm.Show();
+        EnsureTeardownHookRegistered();
+        // Session survival: a hidden (✕-closed) window keeps its session.
+        // Only the real teardown (see OnNxProcessTeardown) reaches the
+        // controller Dispose path. The user's ✕ is a hide — the lifecycle
+        // state machinery on the form distinguishes the two.
+    }
+
+    /// <summary>
+    /// Registers the CLR teardown hook once per process. When the CLR inside
+    /// the NX process unloads (NX exits the .NET session cleanly), the chat
+    /// form is closed explicitly with a real teardown: the in-flight request
+    /// is cancelled and the controller detached. A hard NX crash cannot run
+    /// this — the execution ledger stays the durable record for that case.
+    /// </summary>
+    private static void EnsureTeardownHookRegistered()
+    {
+        lock (RegisterGate)
+        {
+            if (_teardownHookRegistered)
+                return;
+            _teardownHookRegistered = true;
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => OnNxProcessTeardown();
+        }
+    }
+
+    private static void OnNxProcessTeardown()
+    {
+        try
+        {
+            _chatForm?.CloseForSessionShutdown();
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("chatwindow.teardown", $"FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 }

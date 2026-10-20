@@ -451,12 +451,13 @@ public sealed class ModelService
     }
 
     /// <summary>
-    /// Maximum tool calls accepted in a single assistant message. Parallel tool
-    /// calls are a Phase-3+ capability: one user turn may produce at most one
-    /// confirmed modeling execution, so any message carrying more than one call
-    /// is refused rather than partially executed.
+    /// Maximum tool calls accepted in a single assistant message. Multiple
+    /// calls are parsed and executed strictly in order, each through the full
+    /// typed-tool pipeline (validation, authorization, execution, result
+    /// feedback with its own tool_call_id). Messages carrying more than this
+    /// count are refused rather than partially executed.
     /// </summary>
-    public const int MaxToolCallsPerMessage = 1;
+    public const int MaxToolCallsPerMessage = 4;
 
     /// <summary>
     /// Chat-completions request with the tool protocol: declares the registered
@@ -675,7 +676,8 @@ public sealed class ModelService
                 if (toolCalls.Count > MaxToolCallsPerMessage)
                 {
                     return ChatCompletionResult.Fail(ModelChatError.InvalidResponse,
-                        $"模型一次请求了 {toolCalls.Count} 个工具调用；当前版本每条消息最多支持 {MaxToolCallsPerMessage} 个。");
+                        $"模型一次请求了 {toolCalls.Count} 个工具调用；单条消息最多支持 {MaxToolCallsPerMessage} 个，" +
+                        $"请将建模请求拆分为多个步骤发送。");
                 }
                 return ChatCompletionResult.OkToolCalls(toolCalls);
             }

@@ -118,7 +118,7 @@ public class ModelServiceToolProtocolTests
     }
 
     [Fact]
-    public async Task ParallelToolCalls_Rejected()
+    public async Task ParallelToolCalls_AcceptedInOrder()
     {
         var handler = new FakeHandler(JsonOk(
             """{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"create_block","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"create_block","arguments":"{}"}}]}}]}"""));
@@ -127,9 +127,42 @@ public class ModelServiceToolProtocolTests
         var result = await service.GetChatCompletionWithToolsAsync(
             [UserMessage], OneTool, CancellationToken.None);
 
-        Assert.False(result.Success);
-        Assert.Equal(ModelChatError.InvalidResponse, result.Error);
-        Assert.Contains("最多", result.ErrorMessage);
+        // Multiple parallel calls are supported: parsed in original order,
+        // each with its own id, executed by the controller sequentially.
+        Assert.True(result.Success);
+        Assert.Equal(2, result.ToolCalls.Count);
+        Assert.Equal("c1", result.ToolCalls[0].Id);
+        Assert.Equal("c2", result.ToolCalls[1].Id);
+    }
+
+    [Fact]
+    public async Task ParallelToolCalls_OverCap_Rejected()
+    {
+        // Allowed: MaxToolCallsPerMessage calls in one message.
+        var max = ModelService.MaxToolCallsPerMessage;
+        var oneCall = "{\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"create_block\",\"arguments\":\"{}\"}}";
+        var calls = string.Join(",", Enumerable.Range(1, max).Select(_ => oneCall));
+        var body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[" +
+                   calls + "]}}]}";
+        var handler = new FakeHandler(JsonOk(body));
+        var service = CreateService(handler);
+        var ok = await service.GetChatCompletionWithToolsAsync(
+            [UserMessage], OneTool, CancellationToken.None);
+        Assert.True(ok.Success);
+
+        // One more than the cap: refused with a real message, not truncated.
+        var overCalls = string.Join(",", Enumerable.Range(1, max + 1).Select(_ => oneCall));
+        var overBody = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[" +
+                       overCalls + "]}}]}";
+        var overHandler = new FakeHandler(JsonOk(overBody));
+        var overService = CreateService(overHandler);
+        var over = await overService.GetChatCompletionWithToolsAsync(
+            [UserMessage], OneTool, CancellationToken.None);
+
+        Assert.False(over.Success);
+        Assert.Equal(ModelChatError.InvalidResponse, over.Error);
+        Assert.Contains("最多", over.ErrorMessage);
+        Assert.Contains($"{max + 1} 个", over.ErrorMessage);
     }
 
     [Fact]

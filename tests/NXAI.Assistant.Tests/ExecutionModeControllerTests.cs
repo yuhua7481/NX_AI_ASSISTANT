@@ -116,6 +116,8 @@ public class ExecutionModeControllerTests
             CallCount++; LastToolName = "boolean_operation"; LastExpectedPath = expectedWorkPartFullPath;
             return Result;
         }
+
+        public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
     }
 
     private sealed class ConfirmationGate

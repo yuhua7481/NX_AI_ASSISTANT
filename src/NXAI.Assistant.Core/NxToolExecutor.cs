@@ -131,4 +131,52 @@ public interface INxToolExecutor
     /// </summary>
     CreateBlockExecutionResult ExecuteBooleanOperation(
         BooleanOperationParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// READ-ONLY probe: did a previous attempt of this modeling operation
+    /// actually commit a feature in the current work part? Used by the
+    /// autonomous mode's unknown-outcome recovery — the controller asks the
+    /// live part instead of showing a human confirmation dialog.
+    ///
+    /// Implementations must not mutate anything: no undo mark, no builder,
+    /// no update. The probe returns one of three verifiable answers:
+    ///   - Committed: a feature matching the operation exists and is not
+    ///     suppressed (operationSummary + feature identity returned in
+    ///     DetailsJson);
+    ///   - NotCommitted: no such feature exists (the part carries no trace
+    ///     of the attempt);
+    ///   - the attempt could not be judged (returns null) — e.g. the probe
+    ///     itself cannot run safely; the caller must then treat the state
+    ///     as unknown and stop, never retry blindly.
+    /// </summary>
+    ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary);
+}
+
+/// <summary>
+/// The outcome of a read-only committed-feature probe. ProbeCommittedFeature
+/// returning null (not this record) means "cannot judge".
+/// </summary>
+public sealed class ModelFeatureProbeResult
+{
+    private ModelFeatureProbeResult(bool committed, string message, string? detailsJson)
+    {
+        Committed = committed;
+        Message = message;
+        DetailsJson = detailsJson;
+    }
+
+    /// <summary>True when a matching committed feature was found.</summary>
+    public bool Committed { get; }
+
+    /// <summary>Human-readable finding (Chinese), safe for chat display.</summary>
+    public string Message { get; }
+
+    /// <summary>Optional tool-specific extras (e.g. feature identity).</summary>
+    public string? DetailsJson { get; }
+
+    public static ModelFeatureProbeResult CommittedFound(string message, string? detailsJson = null) =>
+        new(true, message, detailsJson);
+
+    public static ModelFeatureProbeResult NotCommitted(string message, string? detailsJson = null) =>
+        new(false, message, detailsJson);
 }

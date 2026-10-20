@@ -69,6 +69,7 @@ public class IndependentRequestChainTests
             CreateRevolveParameters p, string? path) => Record("create_revolve", path);
         public CreateBlockExecutionResult ExecuteBooleanOperation(
             BooleanOperationParameters p, string? path) => Record("boolean_operation", path);
+        public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
 
         public CreateBlockExecutionResult ExecuteCreateSketch(
             CreateSketchParameters p, string? path)
