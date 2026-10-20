@@ -108,10 +108,11 @@ public class AutonomousUnknownOutcomeRecoveryTests
             return ProbeOverride?.Invoke(toolName, operationSummary);
         }
         public ModelFeatureProbeResult? ProbeCommittedFeature(
-            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+            BooleanOperationType? operationType = null) =>
             ProbeCommittedFeature(toolName, operationSummary);
 
-        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null) => null;
 
         /// <summary>Set to control the probe answer; null fn = cannot judge.</summary>
         public Func<string, string, ModelFeatureProbeResult?>? ProbeOverride { get; set; }

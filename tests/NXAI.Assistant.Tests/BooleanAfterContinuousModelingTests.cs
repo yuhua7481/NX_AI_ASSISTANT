@@ -163,10 +163,11 @@ public class BooleanAfterContinuousModelingTests
             return ProbeOverride?.Invoke(toolName, operationSummary);
         }
         public ModelFeatureProbeResult? ProbeCommittedFeature(
-            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+            BooleanOperationType? operationType = null) =>
             ProbeCommittedFeature(toolName, operationSummary);
 
-        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null) => null;
     }
 
     private static (ChatSessionController, ScriptedSender, ChatLog, ScriptableExecutor, ConfirmationGate)
@@ -581,5 +582,120 @@ public class BooleanAfterContinuousModelingTests
         card.TryRespond(new ToolConfirmationDecision(true, null));
         await WaitForCompletedAsync(controller);
         Assert.Equal(1, executor.BooleanCallCount);
+    }
+
+    // ------------- 补充修复：空快照基线 + 按操作类型归因 (2026-10-20)
+
+    [Fact]
+    public async Task EmptySnapshot_NewSubtract_IsAttributed_AndRequestStops()
+    {
+        // Requirement 3.1: a VALID EMPTY snapshot (no matching features
+        // existed before the attempt) + a new SUBTRACT feature → correctly
+        // attributed → recovered as a terminating fact and STOP (no
+        // duplicate). Must NOT return "无法判断" just because the snapshot
+        // set is empty.
+        var ledger = new ModelingExecutionLedger();
+        ledger.BeginAttempt("boolean_operation", "布尔差集 未知结果");
+        var (controller, sender, log, executor, gate) = CreateAutonomous(ledger);
+        executor.SnapshotOverride = new HashSet<string>();          // valid empty baseline
+        executor.ProbeOverride = (_, _) => ModelFeatureProbeResult.CommittedFound(
+            "在当前工作部件中发现 1 个可归因于待核操作的已提交特征：SUBTRACT 特征（SUBTRACT_NEW_1）。");
+
+        sender.Enqueue(
+            ScriptedSender.ToolCall("c3", "boolean_operation", BooleanDiffCallJson),
+            () => ChatCompletionResult.OkText("不应到达。"));
+        controller.StartSend("执行布尔差集，保留第一个实体");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.ProbeCallCount);
+        Assert.Equal(0, executor.BooleanCallCount);                 // no duplicate
+        Assert.Empty(gate.Requests);
+        var entry = Assert.Single(ledger.Snapshot(), e => e.LedgerId == "ledger_1");
+        Assert.Equal(ModelingExecutionState.Recorded, entry.State);
+        Assert.Contains("SUBTRACT", entry.ResultMessage);
+        _ = log;
+    }
+
+    [Fact]
+    public async Task NullSnapshot_MatchingFeaturesExist_SafeStops()
+    {
+        // Requirement 3.2: snapshot UNAVAILABLE (null) + matching features
+        // in the part → existence alone cannot be attributed → the
+        // recovery must fail SAFE (stop with the reason), never guess.
+        var ledger = new ModelingExecutionLedger();
+        ledger.BeginAttempt("boolean_operation", "布尔差集 未知结果");
+        var (controller, sender, log, executor, gate) = CreateAutonomous(ledger);
+        executor.SnapshotOverride = null;                           // snapshot unavailable
+        executor.ProbeOverride = (_, _) => null;                    // host contract: unjudgeable
+
+        sender.Enqueue(
+            ScriptedSender.ToolCall("c3", "boolean_operation", BooleanDiffCallJson),
+            () => ChatCompletionResult.OkText("不应到达。"));
+        controller.StartSend("执行布尔差集，保留第一个实体");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.BooleanCallCount);
+        Assert.Empty(gate.Requests);
+        var entry = Assert.Single(ledger.Snapshot(), e => e.LedgerId == "ledger_1");
+        Assert.Equal(ModelingExecutionState.Attempting, entry.State);
+        Assert.Contains(log.Messages, m => m.Role == ChatRole.Error && m.Text.Contains("无法判断"));
+    }
+
+    [Fact]
+    public async Task PendingSubtract_NewUniteFeature_IsNotMisattributed()
+    {
+        // Requirement 3.3: a pending SUBTRACT with a NEW UNITE feature
+        // (a different operation kind) — the UNITE must NOT be treated as
+        // evidence that the subtract committed. The controller scopes the
+        // probe to SUBTRACT by the structured operation type; the verdict
+        // here is not-committed → the difference proceeds.
+        var ledger = new ModelingExecutionLedger();
+        ledger.BeginAttempt("boolean_operation", "布尔差集 未知结果");
+        var (controller, sender, log, executor, gate) = CreateAutonomous(ledger);
+        executor.SnapshotOverride = new HashSet<string>();          // empty baseline (no SUBTRACT existed)
+        executor.ProbeOverride = (tool, _) =>
+        {
+            // Mirror the host's kind scoping: only SUBTRACT features count
+            // as evidence for a pending subtract. A new UNITE is NOT
+            // subtract evidence.
+            return ModelFeatureProbeResult.NotCommitted(
+                "未发现可归因于待核操作（布尔差集）的新增特征。新出现的 UNITE 特征不属于待核差集的证据。");
+        };
+
+        sender.Enqueue(
+            ScriptedSender.ToolCall("c3", "boolean_operation", BooleanDiffCallJson),
+            () => ChatCompletionResult.OkText("完成。"));
+        controller.StartSend("执行布尔差集，保留第一个实体");
+        await WaitForCompletedAsync(controller);
+
+        // The difference proceeds — the new UNITE did not block it.
+        Assert.Equal(1, executor.BooleanCallCount);
+        Assert.Empty(gate.Requests);
+        _ = log;
+    }
+
+    [Fact]
+    public async Task PendingIntersect_NewSubtractFeature_IsNotMisattributed()
+    {
+        // Requirement 3.4: a pending INTERSECT with a NEW SUBTRACT feature —
+        // kind mismatch → not evidence for the intersect; the intersect
+        // proceeds (the recovery verdict is not-committed).
+        var ledger = new ModelingExecutionLedger();
+        ledger.BeginAttempt("boolean_operation", "布尔交集 未知结果");
+        var (controller, sender, log, executor, gate) = CreateAutonomous(ledger);
+        executor.SnapshotOverride = new HashSet<string>();
+        executor.ProbeOverride = (_, _) => ModelFeatureProbeResult.NotCommitted(
+            "未发现可归因于待核操作（布尔交集）的新增特征。新出现的 SUBTRACT 特征不属于待核交集的证据。");
+
+        sender.Enqueue(
+            ScriptedSender.ToolCall("c3", "boolean_operation",
+                """{"operation":"intersect","target_body_ref":"BODY_001","tool_body_ref":"BODY_002"}"""),
+            () => ChatCompletionResult.OkText("完成。"));
+        controller.StartSend("执行布尔交集");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.BooleanCallCount);
+        Assert.Empty(gate.Requests);
+        _ = log;
     }
 }

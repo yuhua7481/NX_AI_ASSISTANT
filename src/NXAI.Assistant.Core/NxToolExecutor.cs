@@ -156,9 +156,12 @@ public interface INxToolExecutor
     /// ATTRIBUTION. The snapshot is taken BEFORE the unknown attempt ran
     /// (by the caller, from ProbeFeatureSnapshot taken at BeginAttempt
     /// time); a feature NOT in the snapshot but matching the operation's
-    /// feature kinds is attributable to THIS attempt — pre-existing
+    /// feature kind is attributable to THIS attempt — pre-existing
     /// same-kind features are correctly excluded. Snapshot entries are
-    /// JournalIdentifier strings.
+    /// JournalIdentifier strings. <paramref name="operationType"/> is the
+    /// STRUCTURED boolean operation of the pending attempt (Unite/Subtract/
+    /// Intersect) — only that exact NX feature kind counts as evidence; a
+    /// null operationType is unjudgeable for booleans.
     ///
     /// Attribution rules:
     ///   - a matching-kind feature absent from the snapshot → attributable
@@ -166,20 +169,28 @@ public interface INxToolExecutor
     ///   - only snapshot-known features of matching kind → NOT attributable
     ///     to this attempt → NotCommitted (the pre-existing features are
     ///     named in the message);
-    ///   - cannot judge (no snapshot, unreadable part, unknown tool) → null.
+    ///   - null snapshot = snapshot UNAVAILABLE (cannot attribute — fail
+    ///     safe); a NON-NULL EMPTY snapshot is a VALID baseline ("no
+    ///     matching features existed before the attempt") — a new matching
+    ///     feature is then attributable;
+    ///   - cannot judge (unreadable part, unknown tool, missing operation
+    ///     type) → null.
     /// </summary>
     ModelFeatureProbeResult? ProbeCommittedFeature(
-        string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds);
+        string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+        BooleanOperationType? operationType = null);
 
     /// <summary>
     /// READ-ONLY pre-attempt snapshot: the JournalIdentifiers of all live,
-    /// un-suppressed features of the kinds the given tool creates (boolean:
-    /// UNITE/SUBTRACT/INTERSECT; extrude: EXTRUDE; …). The caller stores
-    /// this BEFORE BeginAttempt and hands it back to
-    /// ProbeCommittedFeature(…, snapshot) for attribution. Returns null
-    /// when no work part is available (nothing to snapshot); never mutates.
+    /// un-suppressed features of the given NX feature kind (for a boolean
+    /// attempt: exactly UNITE, SUBTRACT or INTERSECT per the attempt's
+    /// structured operation type — never all three at once). The caller
+    /// stores this BEFORE BeginAttempt and hands it back to
+    /// ProbeCommittedFeature(…, snapshot, operationType) for attribution.
+    /// Returns null when no work part is available (nothing to snapshot);
+    /// never mutates. An EMPTY non-null set is a valid baseline.
     /// </summary>
-    IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName);
+    IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null);
 }
 
 /// <summary>

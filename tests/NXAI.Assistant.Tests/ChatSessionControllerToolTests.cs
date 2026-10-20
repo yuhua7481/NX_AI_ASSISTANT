@@ -161,10 +161,11 @@ public class ChatSessionControllerToolTests
 
         public CreateConeParameters? LastConeParameters { get; private set; }
         public ModelFeatureProbeResult? ProbeCommittedFeature(
-            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+            BooleanOperationType? operationType = null) =>
             ProbeCommittedFeature(toolName, operationSummary);
 
-        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null) => null;
         public CreateSphereParameters? LastSphereParameters { get; private set; }
         public string? LastToolName { get; private set; }
 
@@ -216,10 +217,11 @@ public class ChatSessionControllerToolTests
 
         public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
         public ModelFeatureProbeResult? ProbeCommittedFeature(
-            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+            BooleanOperationType? operationType = null) =>
             ProbeCommittedFeature(toolName, operationSummary);
 
-        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null) => null;
 
         public sealed class InProcessCrashException : InvalidOperationException
         {
@@ -1458,10 +1460,11 @@ public class ChatSessionControllerToolTests
 
         public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
         public ModelFeatureProbeResult? ProbeCommittedFeature(
-            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+            BooleanOperationType? operationType = null) =>
             ProbeCommittedFeature(toolName, operationSummary);
 
-        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null) => null;
     }
 
     [Fact]

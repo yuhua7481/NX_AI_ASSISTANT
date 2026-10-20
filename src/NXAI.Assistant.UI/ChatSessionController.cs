@@ -906,9 +906,12 @@ public sealed class ChatSessionController : IDisposable
     private readonly record struct UnknownOutcomeRecovery(bool Stop, CreateBlockExecutionResult Outcome);
 
     /// <summary>Per-attempt pre-execution feature snapshots (ledger id →
-    /// snapshot), consumed by the unknown-state probe for attribution.
-    /// Bounded by the ledger's own lifetime; stale entries are harmless.</summary>
-    private readonly Dictionary<string, IReadOnlySet<string>?> _attemptSnapshots = new(StringComparer.Ordinal);
+    /// snapshot + the attempt's structured boolean operation type), consumed
+    /// by the unknown-state probe for attribution. Bounded by the ledger's
+    /// own lifetime; stale entries are harmless.</summary>
+    private readonly record struct AttemptSnapshot(
+        IReadOnlySet<string>? FeatureIds, BooleanOperationType? BooleanOperation);
+    private readonly Dictionary<string, AttemptSnapshot> _attemptSnapshots = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Autonomous-mode unknown-outcome recovery, driven ONLY by a read-only
@@ -943,11 +946,17 @@ public sealed class ChatSessionController : IDisposable
         // BeginAttempt — features absent from it are attributable to that
         // attempt).
         IReadOnlySet<string>? snapshot = null;
+        BooleanOperationType? pendingBooleanOperation = null;
         foreach (var entry in Enumerable.Reverse(pending))
         {
-            if (_attemptSnapshots.TryGetValue(entry.LedgerId, out var snap) && snap != null)
+            if (_attemptSnapshots.TryGetValue(entry.LedgerId, out var snap))
             {
-                snapshot = snap;
+                // Use the newest pending attempt's snapshot even when it is
+                // an EMPTY set (a valid baseline: no matching features
+                // existed before the attempt). Only a missing entry (null
+                // struct) is skipped.
+                snapshot = snap.FeatureIds;
+                pendingBooleanOperation = snap.BooleanOperation;
                 break;
             }
         }
@@ -955,7 +964,8 @@ public sealed class ChatSessionController : IDisposable
         ModelFeatureProbeResult? probe = null;
         try
         {
-            probe = _toolExecutor?.ProbeCommittedFeature(call.FunctionName, summary, snapshot);
+            probe = _toolExecutor?.ProbeCommittedFeature(
+                call.FunctionName, summary, snapshot, pendingBooleanOperation);
         }
         catch (Exception ex)
         {
@@ -1013,12 +1023,27 @@ public sealed class ChatSessionController : IDisposable
         // Pre-attempt feature-identity snapshot (READ-ONLY): taken BEFORE
         // BeginAttempt so a later unknown-state probe can attribute a
         // matching feature to THIS attempt — pre-existing same-kind
-        // features are excluded from the evidence. Null snapshot (no work
-        // part) simply disables attribution; the probe then fails safe.
+        // features are excluded from the evidence. For a boolean attempt
+        // the snapshot is scoped to the attempt's STRUCTURED operation type
+        // (unite→UNITE / subtract→SUBTRACT / intersect→INTERSECT — never
+        // all three). Null snapshot (no work part) simply disables
+        // attribution; the probe then fails safe.
         IReadOnlySet<string>? featureSnapshot = null;
+        BooleanOperationType? booleanOperationType =
+            request.ParametersKind == ToolParametersKind.Boolean
+                ? request.BooleanParameters!.Operation
+                : null;
         try
         {
-            featureSnapshot = _toolExecutor?.ProbeFeatureSnapshot(request.ToolName);
+            string? featureKind = booleanOperationType switch
+            {
+                BooleanOperationType.Unite => "UNITE",
+                BooleanOperationType.Subtract => "SUBTRACT",
+                BooleanOperationType.Intersect => "INTERSECT",
+                _ => null,
+            };
+            featureSnapshot = _toolExecutor?.ProbeFeatureSnapshot(
+                request.ToolName, featureKind);
         }
         catch (Exception ex)
         {
@@ -1031,7 +1056,7 @@ public sealed class ChatSessionController : IDisposable
         // fact — never auto-downgraded to "not executed".
         string? ledgerId = _ledger?.BeginAttempt(
             request.ToolName, DescribePendingOperation(request));
-        _attemptSnapshots[ledgerId ?? ""] = featureSnapshot;
+        _attemptSnapshots[ledgerId ?? ""] = new AttemptSnapshot(featureSnapshot, booleanOperationType);
         try
         {
             var result = request.ParametersKind switch

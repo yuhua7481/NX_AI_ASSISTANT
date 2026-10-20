@@ -72,10 +72,11 @@ public class IndependentRequestChainTests
         public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
 
         public ModelFeatureProbeResult? ProbeCommittedFeature(
-            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+            BooleanOperationType? operationType = null) =>
             ProbeCommittedFeature(toolName, operationSummary);
 
-        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null) => null;
 
         public CreateBlockExecutionResult ExecuteCreateSketch(
             CreateSketchParameters p, string? path)

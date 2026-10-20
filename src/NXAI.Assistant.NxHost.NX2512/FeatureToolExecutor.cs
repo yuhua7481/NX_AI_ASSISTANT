@@ -2014,40 +2014,49 @@ public sealed partial class NxToolExecutor
     /// returning null means the probe itself could not judge.
     /// </summary>
     public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) =>
-        ProbeCommittedFeatureCore(toolName, operationSummary, preExistingFeatureIds: null);
+        ProbeCommittedFeatureCore(toolName, operationSummary, preExistingFeatureIds: null, operationType: null);
 
     public ModelFeatureProbeResult? ProbeCommittedFeature(
-        string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
-        ProbeCommittedFeatureCore(toolName, operationSummary, preExistingFeatureIds);
+        string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+        BooleanOperationType? operationType = null) =>
+        ProbeCommittedFeatureCore(toolName, operationSummary, preExistingFeatureIds, operationType);
 
     /// <summary>
-    /// Feature kinds each tool creates (NX2512 verified types). Boolean
-    /// results are committed as UNITE/SUBTRACT/INTERSECT features (live
-    /// 2026-10-20). Shared by the probe and the pre-attempt snapshot.
+    /// The NX feature kind a given tool creates. For boolean_operation the
+    /// caller MUST supply the structured operation type (Unite/Subtract/
+    /// Intersect) — the three kinds are never merged into one match set.
     /// </summary>
-    private static string[] FeatureKindsForTool(string toolName) => toolName switch
-    {
-        "create_block" => new[] { "BLOCK" },
-        "create_cylinder" => new[] { "CYLINDER" },
-        "create_cone" => new[] { "CONE" },
-        "create_sphere" => new[] { "SPHERE" },
-        "create_sketch" => new[] { "SKETCH" },
-        "create_extrude" => new[] { "EXTRUDE" },
-        "create_revolve" => new[] { "REVOLVED" },
-        "boolean_operation" => new[] { "UNITE", "SUBTRACT", "INTERSECT" },
-        _ => Array.Empty<string>(),
-    };
+    private static string[] FeatureKindsForTool(string toolName, BooleanOperationType? operationType = null) =>
+        (toolName, operationType) switch
+        {
+            ("create_block", _) => new[] { "BLOCK" },
+            ("create_cylinder", _) => new[] { "CYLINDER" },
+            ("create_cone", _) => new[] { "CONE" },
+            ("create_sphere", _) => new[] { "SPHERE" },
+            ("create_sketch", _) => new[] { "SKETCH" },
+            ("create_extrude", _) => new[] { "EXTRUDE" },
+            ("create_revolve", _) => new[] { "REVOLVED" },
+            ("boolean_operation", BooleanOperationType.Unite) => new[] { "UNITE" },
+            ("boolean_operation", BooleanOperationType.Subtract) => new[] { "SUBTRACT" },
+            ("boolean_operation", BooleanOperationType.Intersect) => new[] { "INTERSECT" },
+            _ => Array.Empty<string>(),
+        };
 
-    public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName)
+    public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null)
     {
         try
         {
             var workPart = Session.GetSession().Parts.Work;
             if (workPart is null)
                 return null; // no work part: nothing to snapshot
-            var featureTypes = FeatureKindsForTool(toolName);
+            // A specific feature kind (the pending attempt's structured
+            // operation type) scopes the snapshot; without one the snapshot
+            // is not collected (attribution requires the operation type).
+            string[] featureTypes = featureKind is null
+                ? Array.Empty<string>()
+                : new[] { featureKind.ToUpperInvariant() };
             if (featureTypes.Length == 0)
-                return null; // unknown tool: no snapshot basis
+                return null;
 
             var ids = new HashSet<string>(StringComparer.Ordinal);
             foreach (object item in workPart.Features.ToArray())
@@ -2069,7 +2078,7 @@ public sealed partial class NxToolExecutor
                 }
             }
             PhaseLog.Write("probe.snapshot",
-                $"tool={toolName} snapshot features: {ids.Count}");
+                $"tool={toolName} kind={featureTypes[0]} snapshot features: {ids.Count}");
             return ids;
         }
         catch (Exception ex)
@@ -2080,7 +2089,8 @@ public sealed partial class NxToolExecutor
     }
 
     private ModelFeatureProbeResult? ProbeCommittedFeatureCore(
-        string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds)
+        string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+        BooleanOperationType? operationType)
     {
         try
         {
@@ -2091,11 +2101,13 @@ public sealed partial class NxToolExecutor
                 return ModelFeatureProbeResult.NotCommitted("当前没有活动工作部件，无法存在已提交的建模特征。");
             }
 
-            // Feature kinds each tool creates (shared helper; boolean
-            // results are UNITE/SUBTRACT/INTERSECT — live 2026-10-20).
-            string[] featureTypes = FeatureKindsForTool(toolName);
+            // For a boolean attempt the structured operation type selects the
+            // EXACT feature kind (unite→UNITE, subtract→SUBTRACT,
+            // intersect→INTERSECT); a missing type cannot be guessed from the
+            // summary — fail safe.
+            string[] featureTypes = FeatureKindsForTool(toolName, operationType);
             if (featureTypes.Length == 0)
-                return null; // unknown tool kind: cannot judge
+                return null; // unknown tool kind, or boolean without its type
 
             var matching = new List<Feature>();
             foreach (object item in workPart.Features.ToArray())
@@ -2117,52 +2129,51 @@ public sealed partial class NxToolExecutor
                 }
             }
 
-            // Attribution (live 2026-10-20 follow-up): with a pre-attempt
-            // snapshot, only features ABSENT from it are attributable to the
-            // unknown attempt — an unrelated pre-existing UNITE must never
-            // be presented as evidence that a pending SUBTRACT committed.
-            if (preExistingFeatureIds is { Count: > 0 } snapshot)
-            {
-                var attributable = matching
-                    .Where(f => SafeFeatureId(f) is { } id && !snapshot.Contains(id))
-                    .ToList();
-                string summary = string.IsNullOrWhiteSpace(operationSummary)
-                    ? toolName
-                    : operationSummary;
-                if (attributable.Count > 0)
-                {
-                    return ModelFeatureProbeResult.CommittedFound(
-                        CommittedMessage(toolName, featureTypes, attributable, summary),
-                        JsonSerializer.Serialize(new Dictionary<string, object?>
-                        {
-                            ["featureCount"] = attributable.Count,
-                            ["featureTypes"] = featureTypes,
-                            ["attributedBySnapshot"] = true,
-                        }));
-                }
-                // Only pre-existing features (or none) — nothing attributable.
-                string preExistingNote = matching.Count > 0
-                    ? $"部件中已有 {matching.Count} 个同类型特征，但均为待核操作开始前已存在（无法归因于本次尝试）。"
-                    : "部件中没有匹配类型的特征。";
-                return ModelFeatureProbeResult.NotCommitted(
-                    $"未发现可归因于待核操作（{summary}）的新增特征。{preExistingNote}");
-            }
-
-            // No snapshot available: cannot attribute to THIS attempt — the
-            // existence of matching features is ambiguous (they may be
-            // pre-existing). Fail SAFE per the contract.
-            if (matching.Count > 0)
-            {
-                PhaseLog.Write("probe.committed",
-                    $"cannot attribute: {matching.Count} matching features but no pre-attempt snapshot — treating as unjudgeable");
-                return null;
-            }
-            string summaryNoSnapshot = string.IsNullOrWhiteSpace(operationSummary)
+            string summary = string.IsNullOrWhiteSpace(operationSummary)
                 ? toolName
                 : operationSummary;
+
+            // Snapshot semantics (requirement 1): null = snapshot UNAVAILABLE
+            // (cannot attribute — fail safe); non-null (INCLUDING EMPTY) =
+            // a valid pre-attempt baseline. An empty baseline means no
+            // matching feature existed before the attempt, so ANY matching
+            // feature now is attributable to it.
+            if (preExistingFeatureIds is null)
+            {
+                // No snapshot: matching features are ambiguous (pre-existing
+                // or new) — fail SAFE per the contract.
+                if (matching.Count > 0)
+                {
+                    PhaseLog.Write("probe.committed",
+                        $"cannot attribute: {matching.Count} matching {featureTypes[0]} features but no pre-attempt snapshot — treating as unjudgeable");
+                    return null;
+                }
+                return ModelFeatureProbeResult.NotCommitted(
+                    $"当前工作部件中没有任何已提交的 {featureTypes[0]} 特征，" +
+                    $"待核操作（{summary}）未在部件中留下几何结果。");
+            }
+
+            var snapshot = preExistingFeatureIds;
+            var attributable = matching
+                .Where(f => SafeFeatureId(f) is { } id && !snapshot.Contains(id))
+                .ToList();
+            if (attributable.Count > 0)
+            {
+                return ModelFeatureProbeResult.CommittedFound(
+                    CommittedMessage(toolName, featureTypes, attributable, summary),
+                    JsonSerializer.Serialize(new Dictionary<string, object?>
+                    {
+                        ["featureCount"] = attributable.Count,
+                        ["featureTypes"] = featureTypes,
+                        ["attributedBySnapshot"] = true,
+                    }));
+            }
+            // Only pre-existing features (or none) — nothing attributable.
+            string preExistingNote = matching.Count > 0
+                ? $"部件中已有 {matching.Count} 个 {featureTypes[0]} 特征，但均为待核操作开始前已存在（无法归因于本次尝试）。"
+                : "部件中没有匹配类型的特征。";
             return ModelFeatureProbeResult.NotCommitted(
-                $"当前工作部件中没有任何已提交的 {featureTypes[0]} 特征，" +
-                $"待核操作（{summaryNoSnapshot}）未在部件中留下几何结果。");
+                $"未发现可归因于待核操作（{summary}）的新增特征。{preExistingNote}");
         }
         catch (Exception ex)
         {

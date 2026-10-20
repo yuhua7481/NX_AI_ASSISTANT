@@ -164,10 +164,11 @@ public class RevolveAxisCorrectionControllerTests
             ProbeOverride is { } probe ? probe(toolName, operationSummary) : null;
 
         public ModelFeatureProbeResult? ProbeCommittedFeature(
-            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+            BooleanOperationType? operationType = null) =>
             ProbeCommittedFeature(toolName, operationSummary);
 
-        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => SnapshotOverride;
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null) => SnapshotOverride;
 
         /// <summary>When set, ProbeFeatureSnapshot returns this set.</summary>
         public IReadOnlySet<string>? SnapshotOverride { get; set; }
