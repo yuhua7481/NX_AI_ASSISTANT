@@ -118,6 +118,11 @@ public class ExecutionModeControllerTests
         }
 
         public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
+        public ModelFeatureProbeResult? ProbeCommittedFeature(
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            ProbeCommittedFeature(toolName, operationSummary);
+
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
     }
 
     private sealed class ConfirmationGate

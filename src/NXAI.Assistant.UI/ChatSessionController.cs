@@ -905,6 +905,11 @@ public sealed class ChatSessionController : IDisposable
 
     private readonly record struct UnknownOutcomeRecovery(bool Stop, CreateBlockExecutionResult Outcome);
 
+    /// <summary>Per-attempt pre-execution feature snapshots (ledger id →
+    /// snapshot), consumed by the unknown-state probe for attribution.
+    /// Bounded by the ledger's own lifetime; stale entries are harmless.</summary>
+    private readonly Dictionary<string, IReadOnlySet<string>?> _attemptSnapshots = new(StringComparer.Ordinal);
+
     /// <summary>
     /// Autonomous-mode unknown-outcome recovery, driven ONLY by a read-only
     /// NX probe (never by model text, never by a user dialog):
@@ -933,10 +938,24 @@ public sealed class ChatSessionController : IDisposable
         if (pending.Count > 0)
             summary = pending[^1].OperationSummary;
 
+        // Attribution snapshot: prefer the newest pending attempt's own
+        // pre-execution snapshot (each attempt snapshotted the part before
+        // BeginAttempt — features absent from it are attributable to that
+        // attempt).
+        IReadOnlySet<string>? snapshot = null;
+        foreach (var entry in Enumerable.Reverse(pending))
+        {
+            if (_attemptSnapshots.TryGetValue(entry.LedgerId, out var snap) && snap != null)
+            {
+                snapshot = snap;
+                break;
+            }
+        }
+
         ModelFeatureProbeResult? probe = null;
         try
         {
-            probe = _toolExecutor?.ProbeCommittedFeature(call.FunctionName, summary);
+            probe = _toolExecutor?.ProbeCommittedFeature(call.FunctionName, summary, snapshot);
         }
         catch (Exception ex)
         {
@@ -991,12 +1010,28 @@ public sealed class ChatSessionController : IDisposable
     private CreateBlockExecutionResult ExecuteConfirmedTool(
         ToolConfirmationRequest request, string? expectedWorkPartFullPath)
     {
+        // Pre-attempt feature-identity snapshot (READ-ONLY): taken BEFORE
+        // BeginAttempt so a later unknown-state probe can attribute a
+        // matching feature to THIS attempt — pre-existing same-kind
+        // features are excluded from the evidence. Null snapshot (no work
+        // part) simply disables attribution; the probe then fails safe.
+        IReadOnlySet<string>? featureSnapshot = null;
+        try
+        {
+            featureSnapshot = _toolExecutor?.ProbeFeatureSnapshot(request.ToolName);
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("probe.snapshot", $"controller snapshot FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+
         // Register BEFORE the executor runs; the entry stays Attempting until
         // a terminating result arrives. If Detach/exception cuts this call
         // short of RecordResult, the entry is the durable "result unknown"
         // fact — never auto-downgraded to "not executed".
         string? ledgerId = _ledger?.BeginAttempt(
             request.ToolName, DescribePendingOperation(request));
+        _attemptSnapshots[ledgerId ?? ""] = featureSnapshot;
         try
         {
             var result = request.ParametersKind switch

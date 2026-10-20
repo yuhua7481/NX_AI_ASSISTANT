@@ -150,6 +150,36 @@ public interface INxToolExecutor
     ///     as unknown and stop, never retry blindly.
     /// </summary>
     ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary);
+
+    /// <summary>
+    /// READ-ONLY probe with a pre-attempt feature-identity snapshot for
+    /// ATTRIBUTION. The snapshot is taken BEFORE the unknown attempt ran
+    /// (by the caller, from ProbeFeatureSnapshot taken at BeginAttempt
+    /// time); a feature NOT in the snapshot but matching the operation's
+    /// feature kinds is attributable to THIS attempt — pre-existing
+    /// same-kind features are correctly excluded. Snapshot entries are
+    /// JournalIdentifier strings.
+    ///
+    /// Attribution rules:
+    ///   - a matching-kind feature absent from the snapshot → attributable
+    ///     → CommittedFound;
+    ///   - only snapshot-known features of matching kind → NOT attributable
+    ///     to this attempt → NotCommitted (the pre-existing features are
+    ///     named in the message);
+    ///   - cannot judge (no snapshot, unreadable part, unknown tool) → null.
+    /// </summary>
+    ModelFeatureProbeResult? ProbeCommittedFeature(
+        string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds);
+
+    /// <summary>
+    /// READ-ONLY pre-attempt snapshot: the JournalIdentifiers of all live,
+    /// un-suppressed features of the kinds the given tool creates (boolean:
+    /// UNITE/SUBTRACT/INTERSECT; extrude: EXTRUDE; …). The caller stores
+    /// this BEFORE BeginAttempt and hands it back to
+    /// ProbeCommittedFeature(…, snapshot) for attribution. Returns null
+    /// when no work part is available (nothing to snapshot); never mutates.
+    /// </summary>
+    IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName);
 }
 
 /// <summary>

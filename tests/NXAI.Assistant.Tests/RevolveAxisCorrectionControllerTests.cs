@@ -161,11 +161,21 @@ public class RevolveAxisCorrectionControllerTests
             CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
 
         public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) =>
-            ProbeOverride is { } probe ? probe : null;
+            ProbeOverride is { } probe ? probe(toolName, operationSummary) : null;
+
+        public ModelFeatureProbeResult? ProbeCommittedFeature(
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            ProbeCommittedFeature(toolName, operationSummary);
+
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => SnapshotOverride;
+
+        /// <summary>When set, ProbeFeatureSnapshot returns this set.</summary>
+        public IReadOnlySet<string>? SnapshotOverride { get; set; }
 
         /// <summary>When set, the controller's unknown-outcome probe returns
-        /// this result — drives the autonomous-recovery tests.</summary>
-        public ModelFeatureProbeResult? ProbeOverride { get; set; }
+        /// this result — drives the autonomous-recovery tests. The 2-arg
+        /// ProbeCommittedFeature delegates to it.</summary>
+        public Func<string, string, ModelFeatureProbeResult?>? ProbeOverride { get; set; }
     }
 
     private static (ChatSessionController, ScriptedSender, ChatLog, RecordingExecutor, ConfirmationGate)

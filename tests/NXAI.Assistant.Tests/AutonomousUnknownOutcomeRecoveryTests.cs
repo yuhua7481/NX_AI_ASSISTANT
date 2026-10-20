@@ -107,6 +107,11 @@ public class AutonomousUnknownOutcomeRecoveryTests
             ProbeCallCount++;
             return ProbeOverride?.Invoke(toolName, operationSummary);
         }
+        public ModelFeatureProbeResult? ProbeCommittedFeature(
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            ProbeCommittedFeature(toolName, operationSummary);
+
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
 
         /// <summary>Set to control the probe answer; null fn = cannot judge.</summary>
         public Func<string, string, ModelFeatureProbeResult?>? ProbeOverride { get; set; }

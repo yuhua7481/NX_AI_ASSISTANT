@@ -160,6 +160,11 @@ public class ChatSessionControllerToolTests
             => ProbeResultOverride.TryGetValue(toolName, out var result) ? result : null;
 
         public CreateConeParameters? LastConeParameters { get; private set; }
+        public ModelFeatureProbeResult? ProbeCommittedFeature(
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            ProbeCommittedFeature(toolName, operationSummary);
+
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
         public CreateSphereParameters? LastSphereParameters { get; private set; }
         public string? LastToolName { get; private set; }
 
@@ -210,6 +215,11 @@ public class ChatSessionControllerToolTests
             throw new InProcessCrashException("模拟进程崩溃：执行器未返回");
 
         public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
+        public ModelFeatureProbeResult? ProbeCommittedFeature(
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            ProbeCommittedFeature(toolName, operationSummary);
+
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
 
         public sealed class InProcessCrashException : InvalidOperationException
         {
@@ -1447,6 +1457,11 @@ public class ChatSessionControllerToolTests
                 ToolExecutionStatus.ExecutionUncertain, "无法确认", rolledBack: false);
 
         public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
+        public ModelFeatureProbeResult? ProbeCommittedFeature(
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+            ProbeCommittedFeature(toolName, operationSummary);
+
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
     }
 
     [Fact]

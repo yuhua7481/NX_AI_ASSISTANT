@@ -467,3 +467,14 @@
 - **提交与部署**：commit `12e39ea` 快进推送至 `origin/recovery/pre-review-20261014-234252`（推送期间 GitHub 三次连接超时后成功）；`build.ps1` Release 构建并部署，Core `60e7cfc3…`、NxHost `455ebc5b…` 与构建产物一致（NX 已关闭）。
 - **实机验收（2026-10-20，证据来源：用户报告）**：自主模式执行——WCS XY 平面创建 d20 圆（局部 U=45、V=0）成功（SKETCH_000）；使用用户实际选中的关联直线特征为轴 360° 旋转，`REVOLVED(2)` **返回成功**；用户确认验证通过：**无 verify FAIL、无回滚**。原始日志目录未另行提供，以用户在对话中提供的执行结果为证。
 - **遗留**：本条仅关闭"倾斜轴 + XY 圆形草图 + 360° 旋转包络"失败案例；部分角度（60°/270°）事实驱动验证的进一步实机复验、以及其余 Phase 7 实机清单项，保持既有待验收状态。
+
+## 2026-10-20 · 布尔未知状态探针补充修复：归因快照（离线验证通过；实机复验待执行）
+
+- **补充根因**（前轮 `f55a574` 修复的遗留缺口）：`ProbeCommittedFeature` 对 `boolean_operation` 统一匹配 UNITE/SUBTRACT/INTERSECT 且**扫描全部工作部件特征**——零件中任何已有布尔特征都会被误当作本次未知操作的提交证据（待核差集 + 既有无关并集 → 误判"已提交"→ 拦截/恢复方向全错）；且结果描述固定报告第一个类型名（UNITE），与实际发现不符。
+- **修复**（FeatureToolExecutor.cs + NxToolExecutor.cs + ChatSessionController.cs）：
+  ① 归因快照：`INxToolExecutor` 新增只读 `ProbeFeatureSnapshot(toolName)`（按工具特征类型收集当前部件的 JournalIdentifier 集合）；控制器在**每次 BeginAttempt 之前**采集快照并按 ledger id 保存。
+  ② 归因探针：`ProbeCommittedFeature(toolName, summary, preExistingFeatureIds)`——匹配类型但**不在快照中**的特征才可归因于本次尝试（CommittedFound，消息报告**实际发现的特征类型**，不再固定 UNITE）；仅有快照内特征（操作前已存在）→ NotCommitted（消息说明"均为待核操作开始前已存在"）；**无快照且存在匹配特征 → 无法归因 → 返回 null 安全停止**（不猜测）。
+  ③ 控制器 `ResolveUnknownOutcome` 优先使用最新待决条目的快照调用三参探针。
+- **测试**：`BooleanAfterContinuousModelingTests` 扩至 **17 项**——待核差集+既有无关并集不误判（继续执行）、待核交集+既有差集不混淆（继续执行）、可归因新交集→恢复终结事实并停止（防重复）、无快照+存在匹配特征→安全停止不猜测、三种布尔操作（unite/subtract/intersect）×自主/确认模式全部到达执行器且参数解析正确、无效引用拒绝。7 个测试替身补齐新接口成员（1 处正则批量补丁造成的 4 处语法损伤已逐一手工修复）。全量 Release **551 项 = 550 通过 / 0 失败 / 1 跳过**。
+- **部署**：build.ps1 构建+部署成功（NX 已关闭），NxHost `2e1f1dd7…` 与构建产物一致。
+- **遗留（实机验收设计修正）**：账本为 NX 进程级内存状态，**重启 NX 后旧 Attempting 条目不存在**——实机验收须区分两类：①普通差集验收（重启 NX 后在隔离部件验证参数解析/执行/实体状态）；②未知状态恢复验收（须在同一 NX 会话内**确实制造**待核条目——例如取消一次布尔确认后立即重试——并实际触发宿主探针；无法安全复现时明确标记为待验证，不宣称通过）。

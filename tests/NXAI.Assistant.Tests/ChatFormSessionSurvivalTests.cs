@@ -299,4 +299,10 @@ internal sealed class CountingToolExecutor : INxToolExecutor
     }
 
     public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
+
+    public ModelFeatureProbeResult? ProbeCommittedFeature(
+        string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds) =>
+        ProbeCommittedFeature(toolName, operationSummary);
+
+    public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName) => null;
 }
