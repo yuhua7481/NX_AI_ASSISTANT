@@ -84,17 +84,40 @@ public sealed partial class NxToolExecutor
         // SketchInPlaceBuilder2 (OldCsys/ExistingPlane/NewCsys variants) all
         // failed on XZ/YZ in live testing - the simple builder is the path
         // NX itself records.
+        // Phase 8.8: SelectedPlane restored — the builder's own class doc
+        // states it creates a Sketch on a DatumPlane or planar Face, and
+        // CreateXformByPlaneXDirPoint's first argument is documented as
+        // "planar face or datum plane", so the SELECTED object itself (not a
+        // fixed-type copy) carries the plane reference into the same
+        // journal sequence. Deterministic frame rules keep repeated
+        // executions on one plane from flipping axes.
         Point3d frameOrigin;
         Vector3d frameU, frameV, frameN;
         string planeDescription;
+        DisplayableObject? selectedPlaneObject;
         try
         {
-            ResolveWcsFrame(parameters.PlaneMode, out frameOrigin, out frameU, out frameV, out frameN, out planeDescription, out string? frameFailure);
-            if (frameFailure != null)
+            selectedPlaneObject = null;
+            if (parameters.PlaneMode == SketchPlaneMode.SelectedPlane)
             {
-                return CreateBlockExecutionResult.Failure(
-                    ToolExecutionStatus.PreconditionsChanged, frameFailure,
-                    workPartIdentity: workPartIdentity);
+                if (!ResolveSelectedPlaneFrame(out selectedPlaneObject,
+                        out frameOrigin, out frameU, out frameV, out frameN,
+                        out planeDescription, out string? selectionFailure))
+                {
+                    return CreateBlockExecutionResult.Failure(
+                        ToolExecutionStatus.PreconditionsChanged, selectionFailure!,
+                        workPartIdentity: workPartIdentity);
+                }
+            }
+            else
+            {
+                ResolveWcsFrame(parameters.PlaneMode, out frameOrigin, out frameU, out frameV, out frameN, out planeDescription, out string? frameFailure);
+                if (frameFailure != null)
+                {
+                    return CreateBlockExecutionResult.Failure(
+                        ToolExecutionStatus.PreconditionsChanged, frameFailure,
+                        workPartIdentity: workPartIdentity);
+                }
             }
         }
         catch (Exception ex)
@@ -113,16 +136,21 @@ public sealed partial class NxToolExecutor
         SimpleSketchInPlaceBuilder? sketchBuilder = null;
         try
         {
-            // Mirror NX's recorded journal sequence exactly.
-            var plane = workPart.Planes.CreateFixedTypePlane(
-                frameOrigin,
-                new Matrix3x3
-                {
-                    Xx = frameU.X, Xy = frameU.Y, Xz = frameU.Z,
-                    Yx = frameV.X, Yy = frameV.Y, Yz = frameV.Z,
-                    Zx = frameN.X, Zy = frameN.Y, Zz = frameN.Z,
-                },
-                SmartObject.UpdateOption.WithinModeling);
+            // Mirror NX's recorded journal sequence exactly. For a WCS plane
+            // the journal's step 1 is a fixed-type plane built from the
+            // frame; for a SELECTED plane the selected face/datum plane
+            // itself is the plane reference (SimpleSketchInPlaceBuilder's
+            // documented inputs; CreateXformByPlaneXDirPoint accepts both).
+            DisplayableObject planeObject = selectedPlaneObject ??
+                workPart.Planes.CreateFixedTypePlane(
+                    frameOrigin,
+                    new Matrix3x3
+                    {
+                        Xx = frameU.X, Xy = frameU.Y, Xz = frameU.Z,
+                        Yx = frameV.X, Yy = frameV.Y, Yz = frameV.Z,
+                        Zx = frameN.X, Zy = frameN.Y, Zz = frameN.Z,
+                    },
+                    SmartObject.UpdateOption.WithinModeling);
 
             var xDirection = workPart.Directions.CreateDirection(
                 frameOrigin, frameU, SmartObject.UpdateOption.WithinModeling);
@@ -130,7 +158,7 @@ public sealed partial class NxToolExecutor
             var originPoint = workPart.Points.CreatePoint(frameOrigin);
 
             var xform = workPart.Xforms.CreateXformByPlaneXDirPoint(
-                plane, xDirection, originPoint,
+                planeObject, xDirection, originPoint,
                 SmartObject.UpdateOption.WithinModeling, 0.625, false, false);
 
             var csys = workPart.CoordinateSystems.CreateCoordinateSystem(
@@ -244,9 +272,119 @@ public sealed partial class NxToolExecutor
             default:
                 u = v = n = new Vector3d(0, 0, 0);
                 description = "";
-                failure = $"不支持的草图平面模式：{mode}（selected_plane 请使用已有的选中面路径）。";
+                failure = $"不支持的草图平面模式：{mode}。";
                 break;
         }
+    }
+
+    /// <summary>
+    /// SelectedPlane resolution (Phase 8.8): the current selection must be
+    /// EXACTLY ONE usable plane — a planar face or a datum plane. The frame
+    /// is deterministic (SelectedPlaneFrameMath): u = the in-plane world axis
+    /// with the largest projection (X before Y before Z on ties), v = n × u,
+    /// origin = the face's UV-midpoint representative point (via the verified
+    /// UF_MODL APIs) or the datum plane's own origin. The selected object
+    /// itself is returned as the plane reference for the journal sequence —
+    /// a different selection kind refuses with a diagnosis and never
+    /// creates the sketch somewhere else.
+    /// </summary>
+    private static bool ResolveSelectedPlaneFrame(
+        out DisplayableObject? planeObject,
+        out Point3d origin, out Vector3d u, out Vector3d v, out Vector3d n,
+        out string description, out string? failure)
+    {
+        planeObject = null;
+        origin = new Point3d(0, 0, 0);
+        u = v = n = new Vector3d(0, 0, 0);
+        description = "";
+        failure = null;
+
+        var selected = new List<NXObject>();
+        var uiSelection = NXOpen.UI.GetUI().SelectionManager;
+        int count = uiSelection.GetNumSelectedObjects();
+        for (int i = 0; i < count; i++)
+        {
+            if (uiSelection.GetSelectedTaggedObject(i) is NXObject obj)
+                selected.Add(obj);
+        }
+
+        var faces = selected.OfType<Face>().ToList();
+        var datumPlanes = selected.OfType<DatumPlane>().ToList();
+        // Feature nodes (e.g. Features.DatumPlaneFeature — the tree entry NX
+        // selects when the user clicks the datum plane in the Part
+        // Navigator) carry no plane geometry themselves; resolve them to the
+        // DatumPlane they created through the verified Feature.GetEntities.
+        // Each feature must resolve to EXACTLY ONE live DatumPlane; anything
+        // else is a diagnosis, never a guess (same lesson as the revolve
+        // axis feature-node resolution).
+        var features = selected.OfType<Feature>().ToList();
+        var featureDiagnoses = new List<string>();
+        foreach (var feature in features)
+        {
+            try
+            {
+                var planes = feature.GetEntities()
+                    .OfType<DatumPlane>()
+                    .Where(p => !IsDead(p))
+                    .ToList();
+                if (planes.Count == 1)
+                    datumPlanes.Add(planes[0]);
+                else
+                    featureDiagnoses.Add(
+                        $"{feature.JournalIdentifier} 解析出 {planes.Count} 个基准面（预期 1）");
+            }
+            catch (Exception ex)
+            {
+                featureDiagnoses.Add($"{feature.JournalIdentifier} 无法读取实体：{ex.Message}");
+            }
+        }
+        int usable = faces.Count + datumPlanes.Count;
+        if (usable == 0)
+        {
+            string diag = featureDiagnoses.Count > 0
+                ? "；" + string.Join("、", featureDiagnoses)
+                : "";
+            failure = "当前没有选中的可用平面：selected_plane 需要先在 NX 中选中一个平面表面或基准面。" +
+                $"当前选中 {selected.Count} 个对象，均不是可用平面{diag}。";
+            return false;
+        }
+        if (usable > 1)
+        {
+            failure = $"选中的可用平面有 {usable} 个（面 {faces.Count}、基准面 {datumPlanes.Count}），" +
+                "无法确定草图放置平面。请只保留一个平面选择后重试。";
+            return false;
+        }
+
+        if (faces.Count == 1)
+        {
+            var face = faces[0];
+            if (!IsPlanarFace(face))
+            {
+                failure = $"选中的面不是平面（类型：{face.SolidFaceType}），无法在其上创建草图。";
+                return false;
+            }
+            // Verified UF_MODL read path (Phase 5.1 crash lesson: never
+            // UFEvalsf on planar faces).
+            GetPlanarFaceFrame(face, out origin, out n);
+            planeObject = face;
+            description = "选中的平面";
+        }
+        else
+        {
+            var datum = datumPlanes[0];
+            origin = datum.Origin;
+            n = VecNormalize(datum.Normal);
+            planeObject = datum;
+            description = "选中的基准面";
+        }
+
+        var (ux, uy, uz, vx, vy, vz) = SelectedPlaneFrameMath.BuildFrame(n.X, n.Y, n.Z);
+        u = new Vector3d(ux, uy, uz);
+        v = new Vector3d(vx, vy, vz);
+        PhaseLog.Write("execute.sketch",
+            $"selected plane frame: obj={SafeFeatureObjectId(planeObject)} origin=({origin.X:F3},{origin.Y:F3},{origin.Z:F3}) " +
+            $"n=({n.X:F3},{n.Y:F3},{n.Z:F3}) u=({u.X:F3},{u.Y:F3},{u.Z:F3}) v=({v.X:F3},{v.Y:F3},{v.Z:F3})");
+        return true;
     }
 
 
@@ -1686,22 +1824,100 @@ public sealed partial class NxToolExecutor
             session.UpdateManager.DoUpdate(markId);
             PhaseLog.Write("execute.boolean", $"commit done: {opName}");
 
-            var verification = VerifyBooleanResult(workPart, bodiesBefore, idsBefore,
-                parameters.Operation, targetBox, toolBox);
-            if (!verification.Success)
+            // Postcondition facts (NX reads only); the DECISION lives in
+            // Core (BooleanResultVerificationPolicy) and is offline-tested.
+            // Phase 8.8: live evidence showed two legal post-commit states —
+            // effective (count −1, one identity consumed or one new body)
+            // and NO-EFFECT (disjoint subtract/intersect: count unchanged,
+            // both identities alive, target box unchanged). The no-effect
+            // state is reported honestly and NOT rolled back (the committed
+            // feature is NX's truthful answer for that input), never
+            // misreported as success.
+            int bodiesAfter = CountBodies(workPart);
+            var idsAfter = CollectBodyIds(workPart);
+            Body? targetAfter = FindBodyByRef(workPart, target.JournalIdentifier);
+            Body? toolAfter = FindBodyByRef(workPart, tool.JournalIdentifier);
+            bool targetAlive = targetAfter != null && !IsDead(targetAfter);
+            bool toolAlive = toolAfter != null && !IsDead(toolAfter);
+            int newBodyCount = 0;
+            Body? newBody = null;
+            foreach (object item in workPart.Bodies)
+            {
+                if (item is Body body && !idsBefore.Contains(body.JournalIdentifier))
+                {
+                    newBodyCount++;
+                    newBody ??= body;
+                }
+            }
+            var facts = new BooleanResultFacts(
+                parameters.Operation, bodiesBefore, bodiesAfter,
+                targetAlive, toolAlive, newBodyCount,
+                targetBox, targetAfter != null ? ReadBodyBox(targetAfter) : null,
+                toolBox, null);
+
+            var accounting = BooleanResultVerificationPolicy.ClassifyAccounting(facts);
+            PhaseLog.Write("execute.boolean",
+                $"verify: before={bodiesBefore} after={bodiesAfter} targetAlive={targetAlive} " +
+                $"toolAlive={toolAlive} newBodies={newBodyCount} -> {accounting.Outcome}");
+
+            if (accounting.Outcome == BooleanVerificationOutcome.NoEffect)
+            {
+                LogFailure(new InvalidOperationException($"Boolean no-effect: {accounting.Reason}"),
+                    workPartIdentity, $"Boolean{opName}");
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.ExecutionFailed,
+                    $"布尔{opName}已提交但未产生几何效果：{accounting.Reason}" +
+                    "请检查两个实体是否实际相交；本次模型状态保持原样（已提交的布尔特征如实保留，未回滚）。",
+                    rolledBack: false, workPartIdentity: workPartIdentity);
+            }
+            if (accounting.Outcome == BooleanVerificationOutcome.Failure)
             {
                 (bool undone, string undoError) = Rollback(session, markId, $"NXAI 布尔{opName}");
-                LogFailure(new InvalidOperationException($"Boolean postcondition failed: {verification.Reason}"),
+                LogFailure(new InvalidOperationException($"Boolean postcondition failed: {accounting.Reason}"),
                     workPartIdentity, $"Boolean{opName}");
                 return CreateBlockExecutionResult.Failure(
                     ToolExecutionStatus.VerificationFailed,
-                    $"布尔{opName}结果与预期不符（{verification.Reason}）。" +
+                    $"布尔{opName}结果与预期不符（{accounting.Reason}）。" +
                     (undone ? "已回滚本次操作。" : $"回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。"),
                     rolledBack: undone, workPartIdentity: workPartIdentity);
             }
 
-            string resultBodyRef = verification.BodyRef!;
-            string toolFate = "工具体已被消耗（合并入布尔特征）";
+            Body? result = accounting.ResultBodySource switch
+            {
+                BooleanResultBody.NewBody => newBody,
+                BooleanResultBody.TargetIdentity => targetAfter,
+                _ => toolAfter,
+            };
+            if (result == null)
+            {
+                (bool undone, string undoError) = Rollback(session, markId, $"NXAI 布尔{opName}");
+                LogFailure(new InvalidOperationException("Boolean result body unresolvable"),
+                    workPartIdentity, $"Boolean{opName}");
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.VerificationFailed,
+                    "无法定位布尔结果实体。" +
+                    (undone ? "已回滚本次操作。" : $"回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。"),
+                    rolledBack: undone, workPartIdentity: workPartIdentity);
+            }
+
+            facts = facts with { ResultBox = ReadBodyBox(result) };
+            var (containmentOk, containmentReason) = BooleanResultVerificationPolicy.VerifyContainment(facts);
+            if (!containmentOk)
+            {
+                (bool undone, string undoError) = Rollback(session, markId, $"NXAI 布尔{opName}");
+                LogFailure(new InvalidOperationException($"Boolean postcondition failed: {containmentReason}"),
+                    workPartIdentity, $"Boolean{opName}");
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.VerificationFailed,
+                    $"布尔{opName}结果与预期不符（{containmentReason}）。" +
+                    (undone ? "已回滚本次操作。" : $"回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。"),
+                    rolledBack: undone, workPartIdentity: workPartIdentity);
+            }
+
+            string resultBodyRef = result.JournalIdentifier;
+            string toolFate = accounting.ResultBodySource == BooleanResultBody.TargetIdentity
+                ? "工具体已被消耗（合并入布尔特征）"
+                : "结果实体已定位";
             string details = JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["operation"] = parameters.Operation.ToString().ToLowerInvariant(),
@@ -1742,72 +1958,6 @@ public sealed partial class NxToolExecutor
         {
             return Array.Empty<double>();
         }
-    }
-
-    /// <summary>
-    /// Boolean postcondition: exactly one body consumed (n → n−1), and the
-    /// surviving body satisfies the operation's necessary containment
-    /// relations (unite: ⊇ target; subtract: ⊆ target; intersect: ⊆ both).
-    /// Necessary-condition strength is documented — volume-level equality is
-    /// a live acceptance item, not claimed here.
-    /// </summary>
-    private static (bool Success, string Reason, string? BodyRef) VerifyBooleanResult(
-        Part workPart, int bodiesBefore, HashSet<string> idsBefore,
-        BooleanOperationType operation, double[] targetBox, double[] toolBox)
-    {
-        int after = CountBodies(workPart);
-        if (after != bodiesBefore - 1)
-            return (false, $"实体数量为 {after}，预期 {bodiesBefore - 1}", null);
-
-        Body? result = null;
-        foreach (object item in workPart.Bodies)
-        {
-            if (item is Body body && !idsBefore.Contains(body.JournalIdentifier))
-            {
-                if (result != null)
-                    return (false, "发现多个新实体，无法确定布尔结果", null);
-                result = body;
-            }
-        }
-        result ??= FindBodyByRef(workPart, idsBefore.Count > 0 ? "" : "") is null ? null : result;
-        if (result == null)
-        {
-            // Target identity may survive the boolean — fall back to the
-            // surviving body that is neither of the original identities.
-            foreach (object item in workPart.Bodies)
-            {
-                if (item is Body body)
-                    result = body;
-            }
-            if (result == null)
-                return (false, "无法定位布尔结果实体", null);
-        }
-
-        double[] resultBox = ReadBodyBox(result);
-        if (resultBox.Length != 6 || targetBox.Length != 6 || toolBox.Length != 6)
-            return (false, "无法读取布尔运算前后的包围盒", result.JournalIdentifier);
-
-        const double tol = 0.01;
-        bool Contains(double[] outer, double[] inner) =>
-            inner[0] >= outer[0] - tol && inner[1] >= outer[1] - tol && inner[2] >= outer[2] - tol &&
-            inner[3] <= outer[3] + tol && inner[4] <= outer[4] + tol && inner[5] <= outer[5] + tol;
-
-        switch (operation)
-        {
-            case BooleanOperationType.Unite:
-                if (!Contains(resultBox, targetBox))
-                    return (false, "并集结果包围盒不包含目标体包围盒", result.JournalIdentifier);
-                break;
-            case BooleanOperationType.Subtract:
-                if (!Contains(targetBox, resultBox))
-                    return (false, "差集结果包围盒未保持在目标体范围内", result.JournalIdentifier);
-                break;
-            case BooleanOperationType.Intersect:
-                if (!Contains(targetBox, resultBox) || !Contains(toolBox, resultBox))
-                    return (false, "交集结果包围盒未同时包含于目标体与工具体范围内", result.JournalIdentifier);
-                break;
-        }
-        return (true, "", result.JournalIdentifier);
     }
 
     // ------------------------------------------------------ shared verification
