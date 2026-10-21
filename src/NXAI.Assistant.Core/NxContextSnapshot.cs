@@ -114,7 +114,9 @@ public sealed record NxPointInfo(
 
 public sealed record NxFeatureInfo(
     string FeatureTypeName,
-    string? FeatureName);
+    string? FeatureName,
+    string? OutputBodyRef = null,
+    int? OutputBodyCount = null);
 
 public static class NxContextSnapshotExtensions
 {
@@ -195,6 +197,15 @@ public static class NxContextSnapshotExtensions
         {
             head += $"：{item.Feature.FeatureTypeName}" +
                     (item.Feature.FeatureName != null ? $"（{item.Feature.FeatureName}）" : "");
+            // The REAL output-body reference — collected from the feature's
+            // actual output entities, never the feature display name. Zero,
+            // multiple or sheet outputs are stated as such, never guessed.
+            if (item.Feature.OutputBodyRef is { } bodyRef)
+                head += $"；输出实体引用: {bodyRef}";
+            else if (item.Feature.OutputBodyCount is { } n and > 1)
+                head += $"；输出实体 {n} 个（无法唯一确定引用）";
+            else
+                head += "；无可解析的输出实体引用";
         }
         return head;
     }

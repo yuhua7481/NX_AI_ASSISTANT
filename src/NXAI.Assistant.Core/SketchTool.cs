@@ -17,18 +17,27 @@ public enum SketchPlaneMode
     WcsYZ,
 }
 
-/// <summary>Closed profile types supported by the first sketch release.</summary>
+/// <summary>
+/// Sketch geometry types. Rectangle/Circle are closed profiles; Line and
+/// Arc are OPEN curves — a sketch holding only open curves cannot feed
+/// extrude/revolve as a closed section, and results must say so.
+/// </summary>
 public enum SketchProfileType
 {
     Rectangle,
     Circle,
+    Line,
+    Arc,
 }
 
 /// <summary>
 /// Accepted parameters for the create_sketch tool. CenterU/CenterV are the
 /// profile center offset in the sketch plane's LOCAL coordinates (u/v axes
 /// chosen deterministically by the executor) — never world coordinates.
-/// Linear values are millimeters after unit normalization.
+/// Linear values are millimeters after unit normalization. Line uses
+/// StartU/StartV/EndU/EndV (local); Arc uses CenterU/CenterV + Radius +
+/// StartAngleDeg/EndAngleDeg (degrees, 0° = local +U, counterclockwise,
+/// 0 ≤ start_angle_deg, end_angle_deg ≤ 360, start lower than end).
 /// </summary>
 public sealed record CreateSketchParameters(
     SketchPlaneMode PlaneMode,
@@ -37,7 +46,14 @@ public sealed record CreateSketchParameters(
     double RectangleHeight,
     double CircleDiameter,
     double CenterU,
-    double CenterV);
+    double CenterV,
+    double StartU = 0,
+    double StartV = 0,
+    double EndU = 0,
+    double EndV = 0,
+    double Radius = 0,
+    double StartAngleDeg = 0,
+    double EndAngleDeg = 0);
 
 /// <summary>
 /// Parses and validates create_sketch arguments. Rejects invalid JSON,
@@ -52,6 +68,8 @@ public sealed class CreateSketchRequestParser : IToolRequestParser
     {
         "plane_mode", "profile_type", "width", "height", "diameter",
         "center_u", "center_v", "unit",
+        "start_u", "start_v", "end_u", "end_v",
+        "radius", "start_angle_deg", "end_angle_deg",
     };
 
     public CreateSketchParameters? ParseParameters(string argumentsJson, out string? error)
@@ -94,6 +112,8 @@ public sealed class CreateSketchRequestParser : IToolRequestParser
                 {
                     ["rectangle"] = SketchProfileType.Rectangle,
                     ["circle"] = SketchProfileType.Circle,
+                    ["line"] = SketchProfileType.Line,
+                    ["arc"] = SketchProfileType.Arc,
                 }, out var profileType, out error))
             return null;
 
@@ -112,7 +132,7 @@ public sealed class CreateSketchRequestParser : IToolRequestParser
             if (!GeometryToolJson.TryReadFiniteNumber(root, "height", out height, out error))
                 return null;
         }
-        else
+        else if (profileType == SketchProfileType.Circle)
         {
             if (!GeometryToolJson.TryReadFiniteNumber(root, "diameter", out diameter, out error))
                 return null;
@@ -129,19 +149,80 @@ public sealed class CreateSketchRequestParser : IToolRequestParser
             if (!GeometryToolJson.TryReadFiniteNumber(root, "center_v", out centerV, out error))
                 return null;
         }
+
+        // Line endpoints (required for line, absent otherwise).
+        double startU = 0, startV = 0, endU = 0, endV = 0;
+        if (profileType == SketchProfileType.Line)
+        {
+            if (!GeometryToolJson.TryReadFiniteNumber(root, "start_u", out startU, out error))
+                return null;
+            if (!GeometryToolJson.TryReadFiniteNumber(root, "start_v", out startV, out error))
+                return null;
+            if (!GeometryToolJson.TryReadFiniteNumber(root, "end_u", out endU, out error))
+                return null;
+            if (!GeometryToolJson.TryReadFiniteNumber(root, "end_v", out endV, out error))
+                return null;
+            if (startU == endU && startV == endV)
+            {
+                error = "起点与终点重合，无法创建直线段。请提供两个不同的端点。";
+                return null;
+            }
+        }
+
+        // Arc parameters (required for arc, absent otherwise).
+        double radius = 0, startAngleDeg = 0, endAngleDeg = 0;
+        if (profileType == SketchProfileType.Arc)
+        {
+            if (!GeometryToolJson.TryReadFiniteNumber(root, "radius", out radius, out error))
+                return null;
+            if (radius <= 0)
+            {
+                error = $"圆弧半径必须为正（收到 {radius}）。";
+                return null;
+            }
+            if (!GeometryToolJson.TryReadFiniteNumber(root, "start_angle_deg", out startAngleDeg, out error))
+                return null;
+            if (!GeometryToolJson.TryReadFiniteNumber(root, "end_angle_deg", out endAngleDeg, out error))
+                return null;
+            if (startAngleDeg < 0 || endAngleDeg > 360 || startAngleDeg >= endAngleDeg)
+            {
+                error = $"圆弧角度范围无效：要求 0 ≤ start_angle_deg < end_angle_deg ≤ 360" +
+                        $"（收到 start={startAngleDeg}, end={endAngleDeg}）。";
+                return null;
+            }
+        }
         error = null;
 
         var parameters = new CreateSketchParameters(
             planeMode, profileType,
             width * factor, height * factor, diameter * factor,
-            centerU * factor, centerV * factor);
+            centerU * factor, centerV * factor,
+            startU * factor, startV * factor, endU * factor, endV * factor,
+            radius * factor, startAngleDeg, endAngleDeg);
 
         // Sanity bounds: the profile must fit the same envelope as a block of
         // the same extent, keeping every tool behind one shared sanity gate.
-        double exWidth = profileType == SketchProfileType.Rectangle ? parameters.RectangleWidth : parameters.CircleDiameter;
-        double exHeight = profileType == SketchProfileType.Rectangle ? parameters.RectangleHeight : parameters.CircleDiameter;
+        double maxAbs = new[] { parameters.CenterU, parameters.CenterV, parameters.StartU, parameters.StartV, parameters.EndU, parameters.EndV }
+            .Select(Math.Abs).DefaultIfEmpty(0).Max();
+        double exWidth = profileType switch
+        {
+            SketchProfileType.Rectangle => parameters.RectangleWidth,
+            SketchProfileType.Circle => parameters.CircleDiameter,
+            SketchProfileType.Arc => parameters.Radius * 2,
+            _ => Math.Abs(parameters.EndU - parameters.StartU),
+        };
+        double exHeight = profileType switch
+        {
+            SketchProfileType.Rectangle => parameters.RectangleHeight,
+            SketchProfileType.Circle => parameters.CircleDiameter,
+            SketchProfileType.Arc => parameters.Radius * 2,
+            _ => Math.Abs(parameters.EndV - parameters.StartV),
+        };
         error = BlockRequestValidator.ValidateWorkingPartRequest(
-            parameters.CenterU, parameters.CenterV, 0, exWidth, exHeight, 1);
+            parameters.ProfileType == SketchProfileType.Line ? 0 : parameters.CenterU,
+            parameters.ProfileType == SketchProfileType.Line ? 0 : parameters.CenterV,
+            0, Math.Max(exWidth, 2 * maxAbs) + (profileType == SketchProfileType.Arc ? 2 * parameters.Radius : 0),
+            Math.Max(exHeight, 2 * maxAbs) + (profileType == SketchProfileType.Arc ? 2 * parameters.Radius : 0), 1);
         if (error != null)
             return null;
 
@@ -200,8 +281,8 @@ public static class CreateSketchTool
             },
             "profile_type": {
               "type": "string",
-              "enum": ["rectangle", "circle"],
-              "description": "封闭轮廓类型：矩形或圆。"
+              "enum": ["rectangle", "circle", "line", "arc"],
+              "description": "轮廓类型：rectangle=封闭矩形，circle=完整圆，line=单条直线段（开放），arc=圆弧段（开放）。单条 line/arc 不是封闭轮廓，不能直接用于拉伸/旋转。"
             },
             "width": {
               "type": "number",
@@ -217,6 +298,37 @@ public static class CreateSketchTool
               "type": "number",
               "exclusiveMinimum": 0,
               "description": "圆形直径，按 unit 指定的单位。profile_type=circle 时必填。"
+            },
+            "start_u": {
+              "type": "number",
+              "description": "直线起点在草图局部坐标 u 方向的坐标，按 unit 指定的单位。profile_type=line 时必填。"
+            },
+            "start_v": {
+              "type": "number",
+              "description": "直线起点在草图局部坐标 v 方向的坐标，按 unit 指定的单位。profile_type=line 时必填。"
+            },
+            "end_u": {
+              "type": "number",
+              "description": "直线终点在草图局部坐标 u 方向的坐标，按 unit 指定的单位。profile_type=line 时必填，且不得与起点重合。"
+            },
+            "end_v": {
+              "type": "number",
+              "description": "直线终点在草图局部坐标 v 方向的坐标，按 unit 指定的单位。profile_type=line 时必填，且不得与起点重合。"
+            },
+            "radius": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "圆弧半径，按 unit 指定的单位。profile_type=arc 时必填。"
+            },
+            "start_angle_deg": {
+              "type": "number",
+              "minimum": 0,
+              "description": "圆弧起始角（度）：以草图局部 +u 轴为 0°，在 u/v 平面内逆时针为正。profile_type=arc 时必填，要求 0 ≤ start_angle_deg < end_angle_deg ≤ 360。"
+            },
+            "end_angle_deg": {
+              "type": "number",
+              "maximum": 360,
+              "description": "圆弧结束角（度）：以草图局部 +u 轴为 0°，逆时针为正。profile_type=arc 时必填，必须大于 start_angle_deg。"
             },
             "center_u": {
               "type": "number",
@@ -236,9 +348,10 @@ public static class CreateSketchTool
         """;
 
     public const string Description =
-        "在指定平面上创建一个真实的 NX 参数化草图，包含一个封闭轮廓（矩形或圆形）。" +
+        "在指定平面上创建一个真实的 NX 参数化草图，包含一个几何元素：封闭轮廓（矩形或圆形）或开放曲线（单条直线、单条圆弧）。" +
         "需要 plane_mode（selected_plane=用户选中的单个平面/基准面，或 wcs_xy/wcs_xz/wcs_yz 基本平面）、profile_type 与 unit；" +
-        "矩形需要 width/height，圆形需要 diameter；可选 center_u/center_v 指定轮廓中心在草图局部坐标中的偏移。" +
-        "创建成功后返回草图引用（sketchRef），供 create_extrude/create_revolve 使用。" +
+        "矩形需要 width/height，圆形需要 diameter；直线需要 start_u/start_v/end_u/end_v（草图局部坐标，起终点不得重合）；" +
+        "圆弧需要 radius 与 start_angle_deg/end_angle_deg（0°=局部 +u 方向，逆时针为正，0 ≤ start < end ≤ 360），可选 center_u/center_v 指定圆心。" +
+        "创建成功后返回草图引用（sketchRef）。注意：单条直线或圆弧不是封闭轮廓，不能直接拉伸/旋转成实体；需要实体时请创建封闭轮廓。" +
         "仅当用户明确要求创建草图时调用；调用后需要用户在界面上确认才会执行。";
 }

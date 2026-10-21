@@ -65,13 +65,16 @@ public class BooleanResultVerificationPolicyTests
     {
         // The 2026-10-20 19:19 live case: subtract committed, both bodies
         // intact, target box unchanged. Previously "实体数量为 2，预期 1" +
-        // rollback. Now: honest no-effect, no rollback.
+        // misattributed verification failure. Now: honest no-effect verdict
+        // (the executor rolls the committed no-op feature back — restored
+        // geometry AND feature history — and never reports success).
         var target = Box(0, 0, 0, 10, 10, 10);
         var d = BooleanResultVerificationPolicy.ClassifyAccounting(Facts(
             BooleanOperationType.Subtract, before: 2, after: 2,
             targetAlive: true, toolAlive: true, newBodies: 0,
             targetBefore: target, targetAfter: target));
         Assert.Equal(BooleanVerificationOutcome.NoEffect, d.Outcome);
+        Assert.NotEqual(BooleanVerificationOutcome.Success, d.Outcome);
     }
 
     [Fact]
@@ -189,7 +192,7 @@ public class BooleanResultVerificationPolicyTests
     }
 
     [Fact]
-    public void Containment_Unite_ResultContainsTarget_Ok()
+    public void Containment_Unite_ResultContainsBothInputs_Ok()
     {
         var ok = BooleanResultVerificationPolicy.VerifyContainment(Facts(
             BooleanOperationType.Unite, 2, 1,
@@ -197,6 +200,20 @@ public class BooleanResultVerificationPolicyTests
             targetBefore: Box(0, 0, 0, 10, 10, 10),
             toolBefore: Box(20, 20, 20, 30, 30, 30)));
         Assert.True(ok.Ok);
+    }
+
+    [Fact]
+    public void Containment_Unite_ResultMissesToolBox_Fails()
+    {
+        // Necessary condition must cover BOTH inputs: a result containing
+        // only the target (tool escaped) is not a provable unite.
+        var ok = BooleanResultVerificationPolicy.VerifyContainment(Facts(
+            BooleanOperationType.Unite, 2, 1,
+            result: Box(0, 0, 0, 10, 10, 10),
+            targetBefore: Box(0, 0, 0, 10, 10, 10),
+            toolBefore: Box(20, 20, 20, 30, 30, 30)));
+        Assert.False(ok.Ok);
+        Assert.Contains("并集", ok.Reason);
     }
 
     [Fact]
@@ -221,5 +238,27 @@ public class BooleanResultVerificationPolicyTests
             targetBefore: Box(0, 0, 0, 10, 10, 10),
             toolBefore: Box(20, 20, 20, 30, 30, 30)));
         Assert.True(ok.Ok);
+    }
+
+    [Fact]
+    public void SecondSubtract_AfterFirstConsumedTool_CannotReuseDeadToolRef()
+    {
+        // The 2026-10-21 13:51 live sequence: after the first subtract
+        // (CYLINDER(2) − BLOCK(1) → SUBTRACT(3), tool consumed), the part
+        // has ONE body. A second subtract naming the dead BLOCK(1) must be
+        // refused upstream (body ref MISS) — the accounting policy never
+        // sees a two-body fact set to bless. Here: a one-candidate fact set
+        // cannot satisfy the "both identities alive" no-effect shape, and a
+        // fact set with a dead tool that loses the target identity is a
+        // failure, never a success.
+        var oneBodyLeft = Facts(
+            BooleanOperationType.Subtract, before: 1, after: 1,
+            targetAlive: true, toolAlive: false, newBodies: 0,
+            targetBefore: Box(0, 0, 0, 10, 10, 10),
+            targetAfter: Box(0, 0, 0, 10, 10, 10));
+        var d = BooleanResultVerificationPolicy.ClassifyAccounting(oneBodyLeft);
+        // Count unchanged with a consumed tool matches NEITHER the effective
+        // (count −1) nor the no-effect (both alive) shape.
+        Assert.Equal(BooleanVerificationOutcome.Failure, d.Outcome);
     }
 }

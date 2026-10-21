@@ -62,6 +62,22 @@ public sealed partial class NxToolExecutor
                 ToolExecutionStatus.InvalidParameters,
                 $"圆形直径必须为正（{parameters.CircleDiameter} 毫米）。");
         }
+        if (parameters.ProfileType == SketchProfileType.Line &&
+            parameters.StartU == parameters.EndU && parameters.StartV == parameters.EndV)
+        {
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.InvalidParameters,
+                "直线起点与终点重合，无法创建直线段。");
+        }
+        if (parameters.ProfileType == SketchProfileType.Arc &&
+            (parameters.Radius <= 0 || parameters.StartAngleDeg < 0 ||
+             parameters.EndAngleDeg > 360 || parameters.StartAngleDeg >= parameters.EndAngleDeg))
+        {
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.InvalidParameters,
+                $"圆弧参数无效：半径必须为正，且要求 0 ≤ start_angle_deg < end_angle_deg ≤ 360" +
+                $"（收到 r={parameters.Radius}, start={parameters.StartAngleDeg}, end={parameters.EndAngleDeg}）。");
+        }
 
         if (!TryResolveWorkPart(expectedWorkPartFullPath, "草图",
                 out Session session, out Part workPart, out string workPartIdentity,
@@ -210,13 +226,34 @@ public sealed partial class NxToolExecutor
                 ["diameter"] = parameters.CircleDiameter,
                 ["centerU"] = parameters.CenterU,
                 ["centerV"] = parameters.CenterV,
+                ["startU"] = parameters.StartU,
+                ["startV"] = parameters.StartV,
+                ["endU"] = parameters.EndU,
+                ["endV"] = parameters.EndV,
+                ["radius"] = parameters.Radius,
+                ["startAngleDeg"] = parameters.StartAngleDeg,
+                ["endAngleDeg"] = parameters.EndAngleDeg,
+                ["closedProfile"] = parameters.ProfileType is SketchProfileType.Rectangle or SketchProfileType.Circle,
             });
+            // Honest capability statement: line/arc sketches are OPEN curves —
+            // they cannot feed extrude/revolve as a closed section until more
+            // geometry closes them. The success never implies "solid-ready".
+            string closedNote = parameters.ProfileType switch
+            {
+                SketchProfileType.Line or SketchProfileType.Arc =>
+                    "（开放曲线，非封闭轮廓：直接拉伸/旋转前需补充几何将其闭合）",
+                _ => "",
+            };
             return CreateBlockExecutionResult.Success(
-                parameters.ProfileType == SketchProfileType.Rectangle ? parameters.RectangleWidth : parameters.CircleDiameter,
-                parameters.ProfileType == SketchProfileType.Rectangle ? parameters.RectangleHeight : parameters.CircleDiameter,
+                parameters.ProfileType == SketchProfileType.Rectangle ? parameters.RectangleWidth :
+                parameters.ProfileType == SketchProfileType.Circle ? parameters.CircleDiameter :
+                parameters.ProfileType == SketchProfileType.Arc ? parameters.Radius * 2 : 0,
+                parameters.ProfileType == SketchProfileType.Rectangle ? parameters.RectangleHeight :
+                parameters.ProfileType == SketchProfileType.Circle ? parameters.CircleDiameter :
+                parameters.ProfileType == SketchProfileType.Arc ? parameters.Radius * 2 : 0,
                 0,
                 $"已在{planeDescription}创建草图（{DescribeProfile(parameters)}），" +
-                $"草图引用 {sketch.JournalIdentifier}。",
+                $"草图引用 {sketch.JournalIdentifier}。{closedNote}",
                 workPartIdentity, details);
         }
         catch (Exception ex)
@@ -393,7 +430,13 @@ public sealed partial class NxToolExecutor
     {
         SketchProfileType.Rectangle =>
             $"矩形 {FormatLength(p.RectangleWidth)} × {FormatLength(p.RectangleHeight)} 毫米",
-        _ => $"圆形直径 {FormatLength(p.CircleDiameter)} 毫米",
+        SketchProfileType.Circle =>
+            $"圆形直径 {FormatLength(p.CircleDiameter)} 毫米",
+        SketchProfileType.Line =>
+            $"直线 ({FormatLength(p.StartU)},{FormatLength(p.StartV)})–({FormatLength(p.EndU)},{FormatLength(p.EndV)}) 毫米（草图局部坐标）",
+        _ =>
+            $"圆弧 圆心({FormatLength(p.CenterU)},{FormatLength(p.CenterV)}) 半径 {FormatLength(p.Radius)} 毫米 " +
+            $"{p.StartAngleDeg:0.###}°–{p.EndAngleDeg:0.###}°",
     };
 
     private static bool IsPlanarFace(Face face)
@@ -407,6 +450,12 @@ public sealed partial class NxToolExecutor
             return false;
         }
     }
+
+    private static double PointDistance(Point3d a, Point3d b) =>
+        Math.Sqrt(
+            (a.X - b.X) * (a.X - b.X) +
+            (a.Y - b.Y) * (a.Y - b.Y) +
+            (a.Z - b.Z) * (a.Z - b.Z));
 
     private static Vector3d VecNormalize(Vector3d v)
     {
@@ -458,15 +507,22 @@ public sealed partial class NxToolExecutor
             // Deriving a frame by hand (Phase ≤7.4) disagreed with the CSYS
             // NX assigns for the XZ plane — the arc came out on a different
             // plane and AddGeometry rejected it with "圆弧的平面必须与草图
-            // 平面平行" (live failure, Phase 8.2). Orientation's element
-            // matrix is row-major with the local axes as COLUMNS (same
-            // verified mapping as TryGetSketchFrame): local X = (Xx,Yx,Zx),
-            // local Y = (Xy,Yy,Zy), local Z (plane normal) = (Xz,Yz,Zz).
+            // 平面平行" (live failure, Phase 8.2).
+            //
+            // Matrix storage convention (live-verified 2026-10-21, tilted
+            // datum plane n=(0,-0.819,0.574)): the ROWS of
+            // Sketch.Orientation.Element are the local axes — row 1
+            // (Xx,Xy,Xz) = local X (sketch u), row 2 (Yx,Yy,Yz) = local Y
+            // (sketch v), row 3 (Zx,Zy,Zz) = local Z (plane normal). The
+            // previous COLUMN extraction matched only on axis-aligned
+            // planes (symmetric matrices) and produced a mirrored V axis +
+            // flipped normal on the tilted plane, putting curve endpoints
+            // off the sketch plane ("对象不在草图平面中", AddGeometry).
             var origin = sketch.Origin;
             Matrix3x3 m = sketch.Orientation.Element;
-            var u = VecNormalize(new Vector3d(m.Xx, m.Yx, m.Zx));
-            var v = VecNormalize(new Vector3d(m.Xy, m.Yy, m.Zy));
-            var n = VecNormalize(new Vector3d(m.Xz, m.Yz, m.Zz));
+            var u = VecNormalize(new Vector3d(m.Xx, m.Xy, m.Xz));
+            var v = VecNormalize(new Vector3d(m.Yx, m.Yy, m.Yz));
+            var n = VecNormalize(new Vector3d(m.Zx, m.Zy, m.Zz));
             PhaseLog.Write("execute.sketch",
                 $"frame from sketch orientation: u=({u.X:F3},{u.Y:F3},{u.Z:F3}) " +
                 $"v=({v.X:F3},{v.Y:F3},{v.Z:F3}) n=({n.X:F3},{n.Y:F3},{n.Z:F3})");
@@ -475,6 +531,19 @@ public sealed partial class NxToolExecutor
                 origin.X + du * u.X + dv * v.X,
                 origin.Y + du * u.Y + dv * v.Y,
                 origin.Z + du * u.Z + dv * v.Z);
+
+            // Coplanarity gate BEFORE AddGeometry (2026-10-21 live failure):
+            // every curve point must satisfy |(p−origin)·n| ≤ tol. A point
+            // off the plane is a mapping bug — refuse here (rollback follows
+            // in the caller), never hand NX a bad curve.
+            double planeTol = 0.01;
+            void AssertOnPlane(Point3d p, string what)
+            {
+                double off = Math.Abs((p.X - origin.X) * n.X + (p.Y - origin.Y) * n.Y + (p.Z - origin.Z) * n.Z);
+                if (off > planeTol)
+                    throw new InvalidOperationException(
+                        $"内部一致性失败：{what} ({p.X:F3},{p.Y:F3},{p.Z:F3}) 偏离草图平面 {off:F3} 毫米，已中止建模。");
+            }
 
             if (parameters.ProfileType == SketchProfileType.Rectangle)
             {
@@ -491,10 +560,11 @@ public sealed partial class NxToolExecutor
                     sketch.AddGeometry(line, Sketch.InferConstraintsOption.InferNoConstraints);
                 }
             }
-            else
+            else if (parameters.ProfileType == SketchProfileType.Circle)
             {
                 double r = parameters.CircleDiameter / 2.0;
                 var center = ProfilePoint(parameters.CenterU, parameters.CenterV);
+                AssertOnPlane(center, "圆心");
                 // CreateArc's normal is xDir × yDir (verified NXOpen docs).
                 // Passing the sketch's OWN local axes (u, v) makes the arc's
                 // normal = u × v = the sketch plane normal by construction —
@@ -502,6 +572,39 @@ public sealed partial class NxToolExecutor
                 Arc circle = workPart.Curves.CreateArc(
                     center, u, v, r, 0.0, 2.0 * Math.PI);
                 sketch.AddGeometry(circle, Sketch.InferConstraintsOption.InferNoConstraints);
+            }
+            else if (parameters.ProfileType == SketchProfileType.Line)
+            {
+                // Single open line segment in the sketch's LOCAL frame: the
+                // endpoints are local u/v offsets mapped through the sketch's
+                // own orientation (never world coordinates).
+                var start = ProfilePoint(parameters.StartU, parameters.StartV);
+                var end = ProfilePoint(parameters.EndU, parameters.EndV);
+                AssertOnPlane(start, "直线起点");
+                AssertOnPlane(end, "直线终点");
+                Line line = workPart.Curves.CreateLine(start, end);
+                sketch.AddGeometry(line, Sketch.InferConstraintsOption.InferNoConstraints);
+                PhaseLog.Write("execute.sketch",
+                    $"line added: local start=({parameters.StartU:F3},{parameters.StartV:F3}) " +
+                    $"end=({parameters.EndU:F3},{parameters.EndV:F3})");
+            }
+            else // Arc
+            {
+                // Single open arc: center in the LOCAL frame, radius in mm,
+                // angles in degrees about the sketch normal (0° = local +u,
+                // counterclockwise — CreateArc measures from xDir toward
+                // yDir, which are exactly the sketch's own u/v here, so the
+                // mapping is direct and the plane matches by construction).
+                double r = parameters.Radius;
+                var center = ProfilePoint(parameters.CenterU, parameters.CenterV);
+                AssertOnPlane(center, "圆弧圆心");
+                double a0 = parameters.StartAngleDeg * Math.PI / 180.0;
+                double a1 = parameters.EndAngleDeg * Math.PI / 180.0;
+                Arc arc = workPart.Curves.CreateArc(center, u, v, r, a0, a1);
+                sketch.AddGeometry(arc, Sketch.InferConstraintsOption.InferNoConstraints);
+                PhaseLog.Write("execute.sketch",
+                    $"arc added: local center=({parameters.CenterU:F3},{parameters.CenterV:F3}) r={r:F3} " +
+                    $"angles=({parameters.StartAngleDeg:F3},{parameters.EndAngleDeg:F3}) deg");
             }
             sketch.Update();
         }
@@ -563,6 +666,68 @@ public sealed partial class NxToolExecutor
         if (curveCount != expectedGeometry)
             return (false, $"草图曲线数量为 {curveCount}，预期 {expectedGeometry}");
 
+        // Type-specific postconditions: the curve NX actually holds must be
+        // the requested KIND with the requested parameters — never just "an
+        // exception did not happen".
+        if (parameters.ProfileType == SketchProfileType.Line)
+        {
+            if (geometry.OfType<Line>().Single() is not { } line)
+                return (false, "草图中的几何不是直线段");
+            var p1 = line.StartPoint;
+            var p2 = line.EndPoint;
+            double tol = DimensionToleranceMm;
+            if (Math.Abs(p1.X - p2.X) < 1e-9 && Math.Abs(p1.Y - p2.Y) < 1e-9 && Math.Abs(p1.Z - p2.Z) < 1e-9)
+                return (false, "草图直线段退化为一个点");
+            // Endpoints must match the analytic local-frame mapping. ROWS
+            // are the local axes (live-verified 2026-10-21; see
+            // BuildSketchProfile).
+            var sketchOrigin = sketch.Origin;
+            Matrix3x3 m = sketch.Orientation.Element;
+            var u = VecNormalize(new Vector3d(m.Xx, m.Xy, m.Xz));
+            var v = VecNormalize(new Vector3d(m.Yx, m.Yy, m.Yz));
+            var expectedStart = new Point3d(
+                sketchOrigin.X + parameters.StartU * u.X + parameters.StartV * v.X,
+                sketchOrigin.Y + parameters.StartU * u.Y + parameters.StartV * v.Y,
+                sketchOrigin.Z + parameters.StartU * u.Z + parameters.StartV * v.Z);
+            var expectedEnd = new Point3d(
+                sketchOrigin.X + parameters.EndU * u.X + parameters.EndV * v.X,
+                sketchOrigin.Y + parameters.EndU * u.Y + parameters.EndV * v.Y,
+                sketchOrigin.Z + parameters.EndU * u.Z + parameters.EndV * v.Z);
+            if (PointDistance(p1, expectedStart) > tol && PointDistance(p1, expectedEnd) > tol)
+                return (false, $"直线端点 ({p1.X:F3},{p1.Y:F3},{p1.Z:F3}) 与预期起点/终点不符");
+            if (PointDistance(p2, expectedEnd) > tol && PointDistance(p2, expectedStart) > tol)
+                return (false, $"直线端点 ({p2.X:F3},{p2.Y:F3},{p2.Z:F3}) 与预期起点/终点不符");
+        }
+        else if (parameters.ProfileType == SketchProfileType.Arc)
+        {
+            if (geometry.OfType<Arc>().Single() is not { } arc)
+                return (false, "草图中的几何不是圆弧");
+            double tol = DimensionToleranceMm;
+            // Verified Arc members (live-used in the revolve envelope code):
+            // CenterPoint, Radius, StartAngle/EndAngle in RADIANS about the
+            // arc's own matrix axes.
+            var center = arc.CenterPoint;
+            var expectedCenter = sketch.Origin;
+            Matrix3x3 m = sketch.Orientation.Element;
+            // ROWS are the local axes (live-verified 2026-10-21).
+            var u = VecNormalize(new Vector3d(m.Xx, m.Xy, m.Xz));
+            var v = VecNormalize(new Vector3d(m.Yx, m.Yy, m.Yz));
+            var want = new Point3d(
+                expectedCenter.X + parameters.CenterU * u.X + parameters.CenterV * v.X,
+                expectedCenter.Y + parameters.CenterU * u.Y + parameters.CenterV * v.Y,
+                expectedCenter.Z + parameters.CenterU * u.Z + parameters.CenterV * v.Z);
+            if (PointDistance(center, want) > tol)
+                return (false, $"圆弧圆心 ({center.X:F3},{center.Y:F3},{center.Z:F3}) 与预期 ({want.X:F3},{want.Y:F3},{want.Z:F3}) 不符");
+            if (Math.Abs(arc.Radius - parameters.Radius) > tol)
+                return (false, $"圆弧半径 {arc.Radius:F3} 与预期 {parameters.Radius:F3} 不符");
+            // Sweep angle must match (CreateArc normalizes to a positive
+            // sweep from start to end angle about its own normal).
+            double sweepDeg = (parameters.EndAngleDeg - parameters.StartAngleDeg);
+            double actualSweepDeg = (arc.EndAngle - arc.StartAngle) * 180.0 / Math.PI;
+            if (Math.Abs(actualSweepDeg - sweepDeg) > 0.05)
+                return (false, $"圆弧扫掠角 {actualSweepDeg:F3}° 与预期 {sweepDeg:F3}° 不符");
+        }
+
         return (true, "");
     }
 
@@ -581,16 +746,124 @@ public sealed partial class NxToolExecutor
         return null;
     }
 
-    private static Body? FindBodyByRef(Part workPart, string bodyRef)
+    /// <summary>
+    /// Resolves a body reference to a live body in the work part. Exact
+    /// JournalIdentifier is the contract path; a unique exact display name
+    /// is the only compatibility fallback (zero/multiple matches refuse).
+    /// The decision lives in Core (BodyRefResolutionPolicy) and is
+    /// offline-tested; this wrapper only collects read-only facts. A miss
+    /// logs the part's real body identities and readable names so the next
+    /// request can be fixed in one round.
+    /// </summary>
+    /// <summary>
+    /// Collects the CURRENT selection as strict body-reference aliases: a
+    /// selected FEATURE contributes an alias only when Feature.GetBodies
+    /// resolves it to EXACTLY ONE alive solid body in this work part
+    /// (verified read-only; zero/multiple/sheet/unreadable → no alias, the
+    /// collection logs why). A directly selected Body contributes nothing —
+    /// its identity is already resolvable exactly.
+    /// </summary>
+    private static List<SelectionAlias> CollectSelectionAliases(Part workPart)
     {
-        foreach (object item in workPart.Bodies)
+        var aliases = new List<SelectionAlias>();
+        try
         {
-            if (item is Body body &&
-                string.Equals(body.JournalIdentifier, bodyRef, StringComparison.Ordinal))
+            var uiSelection = NXOpen.UI.GetUI().SelectionManager;
+            int count = uiSelection.GetNumSelectedObjects();
+            for (int i = 0; i < count; i++)
             {
-                return body;
+                if (uiSelection.GetSelectedTaggedObject(i) is not NXOpen.Features.Feature feature)
+                    continue;
+                string? featureName = null;
+                try { featureName = string.IsNullOrWhiteSpace(feature.Name) ? null : feature.Name; }
+                catch { featureName = null; }
+                if (string.IsNullOrWhiteSpace(featureName))
+                    continue;
+                try
+                {
+                    if (IsDead(feature) || feature.Suppressed)
+                    {
+                        PhaseLog.Write("execute.boolean",
+                            $"alias collect: feature={featureName} dead/suppressed -> skipped");
+                        continue;
+                    }
+                    var bodies = feature.GetBodies()
+                        .Where(b => !IsDead(b))
+                        .ToArray();
+                    // Strict gate: exactly one alive SOLID body. The body's
+                    // owning part is the work part by construction here —
+                    // the feature was read from this part's selection.
+                    if (bodies.Length == 1 && !bodies[0].IsSheetBody)
+                    {
+                        aliases.Add(new SelectionAlias(featureName, bodies[0].JournalIdentifier));
+                        continue;
+                    }
+                    PhaseLog.Write("execute.boolean",
+                        $"alias collect: feature={featureName} outputs={bodies.Length}" +
+                        (bodies.Length == 1 && bodies[0].IsSheetBody ? " (sheet)" : "") + " -> no alias");
+                }
+                catch (Exception ex)
+                {
+                    PhaseLog.Write("execute.boolean",
+                        $"alias collect: feature={featureName} read FAILED: {ex.GetType().Name}: {ex.Message}");
+                }
             }
         }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("execute.boolean",
+                $"alias collect: selection unreadable: {ex.GetType().Name}: {ex.Message}");
+        }
+        return aliases;
+    }
+
+    private static Body? FindBodyByRef(Part workPart, string bodyRef, string? role = null)
+    {
+        var bodies = new List<(Body Body, BodyRefFact Fact)>();
+        foreach (object item in workPart.Bodies)
+        {
+            if (item is not Body body)
+                continue;
+            string? name = null;
+            try { name = string.IsNullOrWhiteSpace(body.Name) ? null : body.Name; }
+            catch { name = null; }
+            bodies.Add((body, new BodyRefFact(body.JournalIdentifier, name)));
+        }
+
+        // Third-priority fallback facts: the CURRENT selection's features
+        // mapped to their unique output bodies (read-only, strict).
+        var aliases = CollectSelectionAliases(workPart);
+        var decision = BodyRefResolutionPolicy.Resolve(
+            bodyRef, bodies.Select(b => b.Fact).ToList(), aliases);
+        if (decision.Success && decision.MatchedJournalIdentifier is { } matched)
+        {
+            if (decision.Error.StartsWith("selected-feature alias", StringComparison.Ordinal))
+            {
+                // Alias path: log the requested alias, the matched feature
+                // identity and the actual resolved body — and require the
+                // resolved body to still exist in the live part.
+                var alias = aliases.First(a => string.Equals(
+                    a.OutputBodyJournalIdentifier, matched, StringComparison.Ordinal));
+                PhaseLog.Write("execute.boolean",
+                    $"body ref ALIAS{(role != null ? $" ({role})" : "")}: requested={bodyRef} " +
+                    $"feature={alias.FeatureName} -> body={matched}");
+            }
+            var resolved = bodies.FirstOrDefault(b => b.Fact.JournalIdentifier == matched).Body;
+            if (resolved == null)
+            {
+                PhaseLog.Write("execute.boolean",
+                    $"body ref MISS{(role != null ? $" ({role})" : "")}: requested={bodyRef} matched={matched} but body not in part");
+            }
+            return resolved;
+        }
+
+        string bodyList = string.Join("、", bodies.Take(8).Select(b =>
+            b.Fact.JournalIdentifier + (b.Fact.DisplayName != null ? $"（名 {b.Fact.DisplayName}）" : "")));
+        string aliasList = aliases.Count > 0
+            ? $" aliases=[{string.Join("、", aliases.Select(a => $"{a.FeatureName}→{a.OutputBodyJournalIdentifier}"))}]"
+            : "";
+        PhaseLog.Write("execute.boolean",
+            $"body ref MISS{(role != null ? $" ({role})" : "")}: requested={bodyRef} bodies=[{bodyList}]{aliasList} reason={decision.Error}");
         return null;
     }
 
@@ -983,7 +1256,9 @@ public sealed partial class NxToolExecutor
         try
         {
             Matrix3x3 m = sketch.Orientation.Element;
-            var localZ = new Vector3d(m.Xz, m.Yz, m.Zz);
+            // ROWS are the local axes (live-verified 2026-10-21 on a tilted
+            // datum plane; see BuildSketchProfile for the full root cause).
+            var localZ = new Vector3d(m.Zx, m.Zy, m.Zz);
             double len = Math.Sqrt(localZ.X * localZ.X + localZ.Y * localZ.Y + localZ.Z * localZ.Z);
             if (len < 1e-9)
             {
@@ -1028,13 +1303,14 @@ public sealed partial class NxToolExecutor
                     // Extreme points of the circle lie in the arc's plane:
                     // center ± r·xDir and center ± r·yDir. Arc exposes its
                     // plane via the inherited Conic.Matrix (NXMatrix.Element
-                    // Matrix3x3, columns = local axes — same verified mapping
-                    // as TryGetSketchFrame).
+                    // Matrix3x3, ROWS = local axes — same convention as
+                    // Sketch.Orientation.Element, live-verified 2026-10-21
+                    // on a tilted datum plane).
                     double r = arc.Radius;
                     var c = arc.CenterPoint;
                     var m = arc.Matrix.Element;
-                    var x = new Vector3d(m.Xx, m.Yx, m.Zx);
-                    var y = new Vector3d(m.Xy, m.Yy, m.Zy);
+                    var x = new Vector3d(m.Xx, m.Xy, m.Xz);
+                    var y = new Vector3d(m.Yx, m.Yy, m.Yz);
                     pts.Add(new Point3d(c.X + r * x.X, c.Y + r * x.Y, c.Z + r * x.Z));
                     pts.Add(new Point3d(c.X - r * x.X, c.Y - r * x.Y, c.Z - r * x.Z));
                     pts.Add(new Point3d(c.X + r * y.X, c.Y + r * y.Y, c.Z + r * y.Z));
@@ -1678,8 +1954,10 @@ public sealed partial class NxToolExecutor
                     double r = arc.Radius;
                     var c = arc.CenterPoint;
                     var m = arc.Matrix.Element;
-                    var x = new Vector3d(m.Xx, m.Yx, m.Zx);
-                    var y = new Vector3d(m.Xy, m.Yy, m.Zy);
+                    // ROWS = local axes (same NXMatrix convention as
+                    // Sketch.Orientation, live-verified 2026-10-21).
+                    var x = new Vector3d(m.Xx, m.Xy, m.Xz);
+                    var y = new Vector3d(m.Yx, m.Yy, m.Yz);
                     if (fullCircle)
                     {
                         circles ??= new List<RevolveEnvelopeMath.CircleFacts>();
@@ -1748,17 +2026,39 @@ public sealed partial class NxToolExecutor
     public CreateBlockExecutionResult ExecuteBooleanOperation(
         BooleanOperationParameters parameters, string? expectedWorkPartFullPath)
     {
+        // Phase-log the ENTRY and every precondition return: the 2026-10-21
+        // live failure showed probe.snapshot (controller) with NO following
+        // execute.boolean line — the executor was reachable but its early
+        // returns were silent, making the failing stage unjudgeable from
+        // logs alone.
+        string opName0 = parameters.Operation switch
+        {
+            BooleanOperationType.Unite => "并集",
+            BooleanOperationType.Subtract => "差集",
+            _ => "交集",
+        };
+        PhaseLog.Write("execute.boolean",
+            $"begin: op={opName0} target={parameters.TargetBodyRef} tool={parameters.ToolBodyRef} expectedPart={expectedWorkPartFullPath ?? "(null)"}");
+
         if (!TryResolveWorkPart(expectedWorkPartFullPath, "布尔运算",
                 out Session session, out Part workPart, out string workPartIdentity,
                 out CreateBlockExecutionResult? failure))
         {
+            PhaseLog.Write("execute.boolean", "REFUSED: work part resolution failed");
+            LogFailure(new InvalidOperationException("布尔运算前置失败：工作部件解析失败。"),
+                workPartIdentity: "(unknown)", operation: $"Boolean{opName0}");
             return failure!;
         }
 
-        Body? target = FindBodyByRef(workPart, parameters.TargetBodyRef);
-        Body? tool = FindBodyByRef(workPart, parameters.ToolBodyRef);
+        Body? target = FindBodyByRef(workPart, parameters.TargetBodyRef, role: "target");
+        Body? tool = FindBodyByRef(workPart, parameters.ToolBodyRef, role: "tool");
         if (target == null)
         {
+            PhaseLog.Write("execute.boolean",
+                $"REFUSED: target ref {parameters.TargetBodyRef} not resolvable (bodies in part: {CountBodies(workPart)})");
+            LogFailure(new InvalidOperationException(
+                    $"布尔运算前置失败：目标体引用 {parameters.TargetBodyRef} 无法在当前工作部件解析。"),
+                workPartIdentity, $"Boolean{opName0}");
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.PreconditionsChanged,
                 $"目标体引用 {parameters.TargetBodyRef} 在当前工作部件中不存在或已失效。请重新创建或选择实体。",
@@ -1766,6 +2066,11 @@ public sealed partial class NxToolExecutor
         }
         if (tool == null)
         {
+            PhaseLog.Write("execute.boolean",
+                $"REFUSED: tool ref {parameters.ToolBodyRef} not resolvable (bodies in part: {CountBodies(workPart)})");
+            LogFailure(new InvalidOperationException(
+                    $"布尔运算前置失败：工具体引用 {parameters.ToolBodyRef} 无法在当前工作部件解析。"),
+                workPartIdentity, $"Boolean{opName0}");
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.PreconditionsChanged,
                 $"工具体引用 {parameters.ToolBodyRef} 在当前工作部件中不存在或已失效。请重新创建或选择实体。",
@@ -1773,6 +2078,9 @@ public sealed partial class NxToolExecutor
         }
         if (ReferenceEquals(target, tool))
         {
+            PhaseLog.Write("execute.boolean", "REFUSED: target and tool resolve to the same body");
+            LogFailure(new InvalidOperationException("布尔运算前置失败：目标体与工具体解析为同一实体。"),
+                workPartIdentity, $"Boolean{opName0}");
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.PreconditionsChanged,
                 "目标体与工具体解析为同一实体，无法执行布尔运算。",
@@ -1780,6 +2088,11 @@ public sealed partial class NxToolExecutor
         }
         if (target.IsSheetBody || tool.IsSheetBody)
         {
+            PhaseLog.Write("execute.boolean",
+                $"REFUSED: sheet body input (target={target.IsSheetBody} tool={tool.IsSheetBody})");
+            LogFailure(new InvalidOperationException(
+                    $"布尔运算前置失败：输入包含片体（target={target.IsSheetBody} tool={tool.IsSheetBody}）。"),
+                workPartIdentity, $"Boolean{opName0}");
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.PreconditionsChanged,
                 "布尔运算需要实体（solid body），当前引用了片体（sheet body）。",
@@ -1790,6 +2103,8 @@ public sealed partial class NxToolExecutor
         HashSet<string> idsBefore = CollectBodyIds(workPart);
         double[] targetBox = ReadBodyBox(target);
         double[] toolBox = ReadBodyBox(tool);
+        PhaseLog.Write("execute.boolean",
+            $"preconditions ok: op={opName0} target={target.JournalIdentifier} tool={tool.JournalIdentifier} bodiesBefore={bodiesBefore}");
 
         string opName = parameters.Operation switch
         {
@@ -1819,10 +2134,40 @@ public sealed partial class NxToolExecutor
             booleanBuilder.Targets.Add(new[] { target });
             booleanBuilder.Tools.Add(new DisplayableObject[] { tool });
 #pragma warning restore CS0618
+            PhaseLog.Write("execute.boolean",
+                $"builder configured: operation={booleanBuilder.Operation} targets=1 tools=1");
 
-            booleanBuilder.CommitFeature();
+            var committedFeature = booleanBuilder.CommitFeature() as Feature;
             session.UpdateManager.DoUpdate(markId);
-            PhaseLog.Write("execute.boolean", $"commit done: {opName}");
+            PhaseLog.Write("execute.boolean",
+                $"commit done: {opName} feature={SafeFeatureObjectId(committedFeature)} type={(committedFeature?.FeatureType ?? "?")}");
+
+            // Stage C: the committed feature and its actual output bodies
+            // are the primary evidence for result attribution (requirement 2
+            // of the 2026-10-21 brief). Identity diffs and counts are still
+            // collected, but a verdict requires BOTH a consistent accounting
+            // AND (for NewBody/ownership questions) the feature's own body
+            // list; an unprovable attribution fails rather than guesses.
+            string? featureType = null;
+            Body[]? featureBodies = null;
+            bool featureAlive = false;
+            if (committedFeature != null)
+            {
+                try
+                {
+                    featureAlive = !IsDead(committedFeature);
+                    featureType = committedFeature.FeatureType;
+                    featureBodies = committedFeature.GetBodies().Where(b => !IsDead(b)).ToArray();
+                }
+                catch (Exception ex)
+                {
+                    PhaseLog.Write("execute.boolean",
+                        $"feature read FAILED: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+            PhaseLog.Write("execute.boolean",
+                $"feature evidence: alive={featureAlive} type={featureType} bodies={(featureBodies == null ? "unreadable" : featureBodies.Length.ToString())}" +
+                (featureBodies is { Length: > 0 } ? $" ids={string.Join(",", featureBodies.Take(3).Select(b => b.JournalIdentifier))}" : ""));
 
             // Postcondition facts (NX reads only); the DECISION lives in
             // Core (BooleanResultVerificationPolicy) and is offline-tested.
@@ -1858,17 +2203,24 @@ public sealed partial class NxToolExecutor
             var accounting = BooleanResultVerificationPolicy.ClassifyAccounting(facts);
             PhaseLog.Write("execute.boolean",
                 $"verify: before={bodiesBefore} after={bodiesAfter} targetAlive={targetAlive} " +
-                $"toolAlive={toolAlive} newBodies={newBodyCount} -> {accounting.Outcome}");
+                $"toolAlive={toolAlive} newBodies={newBodyCount} featureBodies={(featureBodies?.Length ?? -1)} -> {accounting.Outcome}");
 
             if (accounting.Outcome == BooleanVerificationOutcome.NoEffect)
             {
-                LogFailure(new InvalidOperationException($"Boolean no-effect: {accounting.Reason}"),
+                // A committed no-effect feature is a dead artifact in the
+                // feature tree (it adds nothing and would pollute later
+                // reference chains): roll it back to restore the input
+                // geometry AND feature history, then report the honest
+                // no-effect outcome (never success).
+                (bool undone, string undoError) = Rollback(session, markId, $"NXAI 布尔{opName}");
+                LogFailure(new InvalidOperationException($"Boolean no-effect (rolled back): {accounting.Reason}"),
                     workPartIdentity, $"Boolean{opName}");
                 return CreateBlockExecutionResult.Failure(
                     ToolExecutionStatus.ExecutionFailed,
-                    $"布尔{opName}已提交但未产生几何效果：{accounting.Reason}" +
-                    "请检查两个实体是否实际相交；本次模型状态保持原样（已提交的布尔特征如实保留，未回滚）。",
-                    rolledBack: false, workPartIdentity: workPartIdentity);
+                    $"布尔{opName}已提交但未观察到可验证的几何效果：{accounting.Reason}" +
+                    "请核实两个实体的相对位置与交叠情况。" +
+                    (undone ? "已回滚本次操作，模型与特征历史恢复原状。" : $"回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。"),
+                    rolledBack: undone, workPartIdentity: workPartIdentity);
             }
             if (accounting.Outcome == BooleanVerificationOutcome.Failure)
             {
@@ -1884,6 +2236,13 @@ public sealed partial class NxToolExecutor
 
             Body? result = accounting.ResultBodySource switch
             {
+                // The selected source MUST match the accounting verdict
+                // exactly: NewBody → the unique new body; TargetIdentity →
+                // the still-alive target; ToolIdentity → the still-alive
+                // tool. The feature's own output is a CROSS-CHECK, never an
+                // override: a feature body that disagrees with the verdict,
+                // is unrecognizable, or is ambiguous (≠1 live feature body
+                // when the verdict needs one) fails the attempt.
                 BooleanResultBody.NewBody => newBody,
                 BooleanResultBody.TargetIdentity => targetAfter,
                 _ => toolAfter,
@@ -1896,6 +2255,43 @@ public sealed partial class NxToolExecutor
                 return CreateBlockExecutionResult.Failure(
                     ToolExecutionStatus.VerificationFailed,
                     "无法定位布尔结果实体。" +
+                    (undone ? "已回滚本次操作。" : $"回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。"),
+                    rolledBack: undone, workPartIdentity: workPartIdentity);
+            }
+
+            // Cross-check the accounting verdict against the committed
+            // feature's actual output bodies. Each source has exactly one
+            // expected feature body identity:
+            //   NewBody        → the feature's single live output body
+            //                    (identity-mismatched or unreadable → fail);
+            //   TargetIdentity → the feature body list must contain the
+            //                    surviving target (in-place update);
+            //   ToolIdentity   → the feature body list must contain the
+            //                    surviving tool.
+            // Unreadable feature evidence or a body that matches NEITHER the
+            // verdict nor the feature list cannot prove attribution — fail.
+            if (featureBodies == null)
+            {
+                (bool undone, string undoError) = Rollback(session, markId, $"NXAI 布尔{opName}");
+                LogFailure(new InvalidOperationException(
+                        "Boolean feature output unreadable — result attribution unprovable"),
+                    workPartIdentity, $"Boolean{opName}");
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.VerificationFailed,
+                    "无法读取本次布尔特征的实际输出实体，结果归属无法证明。" +
+                    (undone ? "已回滚本次操作。" : $"回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。"),
+                    rolledBack: undone, workPartIdentity: workPartIdentity);
+            }
+            bool featureListMatchesResult = featureBodies.Any(b => ReferenceEquals(b, result));
+            if (!featureListMatchesResult)
+            {
+                (bool undone, string undoError) = Rollback(session, markId, $"NXAI 布尔{opName}");
+                LogFailure(new InvalidOperationException(
+                        $"Boolean result body {result.JournalIdentifier} not in committed feature output ({featureBodies.Length} bodies) — attribution mismatch"),
+                    workPartIdentity, $"Boolean{opName}");
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.VerificationFailed,
+                    "布尔结果实体与已提交特征的实际输出不一致，结果归属无法证明。" +
                     (undone ? "已回滚本次操作。" : $"回滚未完成：{undoError}。请在 NX 撤销列表中手动撤销。"),
                     rolledBack: undone, workPartIdentity: workPartIdentity);
             }
@@ -1915,18 +2311,27 @@ public sealed partial class NxToolExecutor
             }
 
             string resultBodyRef = result.JournalIdentifier;
-            string toolFate = accounting.ResultBodySource == BooleanResultBody.TargetIdentity
-                ? "工具体已被消耗（合并入布尔特征）"
-                : "结果实体已定位";
+            string? featureRef = committedFeature != null ? SafeFeatureObjectId(committedFeature) : null;
+            // Tool fate is derived from the OBSERVED identity state (requirement
+            // 7), never claimed unconditionally.
+            string toolFate = toolAlive
+                ? "工具体仍然存活"
+                : "工具体已被消耗（合并入布尔特征）";
             string details = JsonSerializer.Serialize(new Dictionary<string, object?>
             {
                 ["operation"] = parameters.Operation.ToString().ToLowerInvariant(),
                 ["resultBodyRef"] = resultBodyRef,
-                ["toolConsumed"] = true,
+                ["toolConsumed"] = !toolAlive,
+                ["featureType"] = featureType,
+                ["featureRef"] = featureRef,
             });
+            // The message names THIS attempt's committed feature identity:
+            // two successive booleans can share the same result-body identity
+            // (in-place target update), so the feature ref is what makes the
+            // success attributable to this request — never to a prior one.
             return CreateBlockExecutionResult.Success(
                 0, 0, 0,
-                $"已完成布尔{opName}（结果体引用 {resultBodyRef}，{toolFate}）。",
+                $"已完成布尔{opName}（本次特征 {featureRef ?? "未知"}，结果体引用 {resultBodyRef}，{toolFate}）。",
                 workPartIdentity, details);
         }
         catch (Exception ex)

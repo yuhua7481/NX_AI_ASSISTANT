@@ -40,6 +40,117 @@ public class FeatureToolContractTests
         Assert.Equal(5, p.CenterV);
     }
 
+    // ----------------------- line (Phase: sketch line) -----------------------
+
+    [Fact]
+    public void Sketch_Line_ValidParameters()
+    {
+        var p = new CreateSketchRequestParser().ParseParameters(
+            """{"plane_mode":"wcs_xy","profile_type":"line","start_u":-10,"start_v":-5,"end_u":30,"end_v":15,"unit":"mm"}""",
+            out var error);
+        Assert.Null(error);
+        Assert.Equal(SketchProfileType.Line, p!.ProfileType);
+        Assert.Equal(-10, p.StartU);
+        Assert.Equal(-5, p.StartV);
+        Assert.Equal(30, p.EndU);
+        Assert.Equal(15, p.EndV);
+    }
+
+    [Fact]
+    public void Sketch_Line_NegativeCoordinates_UnitConverted()
+    {
+        var p = new CreateSketchRequestParser().ParseParameters(
+            """{"plane_mode":"selected_plane","profile_type":"line","start_u":-1,"start_v":-2,"end_u":3,"end_v":4,"unit":"cm"}""",
+            out var error);
+        Assert.Null(error);
+        Assert.Equal(SketchPlaneMode.SelectedPlane, p!.PlaneMode);
+        Assert.Equal(-10, p.StartU);
+        Assert.Equal(-20, p.StartV);
+        Assert.Equal(30, p.EndU);
+        Assert.Equal(40, p.EndV);
+    }
+
+    [Theory]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"line","start_u":5,"start_v":5,"end_u":5,"end_v":5,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"line","start_u":0,"start_v":0,"end_u":0,"end_v":0,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"line","start_u":0,"start_v":0,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"line","start_u":0,"start_v":0,"end_u":"x","end_v":1,"unit":"mm"}""")]
+    public void Sketch_Line_DegenerateOrInvalid_Rejected(string args)
+    {
+        var p = new CreateSketchRequestParser().ParseParameters(args, out var error);
+        Assert.Null(p);
+        Assert.NotNull(error);
+    }
+
+    // ----------------------- arc (Phase: sketch arc) -----------------------
+
+    [Theory]
+    [InlineData(0, 90)]
+    [InlineData(0, 360)]
+    [InlineData(359.5, 360)]
+    [InlineData(45, 315)]
+    public void Sketch_Arc_ValidAngleRanges(double s, double e)
+    {
+        var p = new CreateSketchRequestParser().ParseParameters(
+            $$"""{"plane_mode":"wcs_xy","profile_type":"arc","center_u":10,"center_v":-5,"radius":7.5,"start_angle_deg":{{s}},"end_angle_deg":{{e}},"unit":"mm"}""",
+            out var error);
+        Assert.Null(error);
+        Assert.Equal(SketchProfileType.Arc, p!.ProfileType);
+        Assert.Equal(10, p.CenterU);
+        Assert.Equal(-5, p.CenterV);
+        Assert.Equal(7.5, p.Radius);
+        Assert.Equal(s, p.StartAngleDeg);
+        Assert.Equal(e, p.EndAngleDeg);
+    }
+
+    [Theory]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"arc","radius":0,"start_angle_deg":0,"end_angle_deg":90,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"arc","radius":-3,"start_angle_deg":0,"end_angle_deg":90,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"arc","radius":5,"start_angle_deg":90,"end_angle_deg":90,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"arc","radius":5,"start_angle_deg":120,"end_angle_deg":90,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"arc","radius":5,"start_angle_deg":-10,"end_angle_deg":90,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"arc","radius":5,"start_angle_deg":0,"end_angle_deg":361,"unit":"mm"}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"arc","radius":5,"start_angle_deg":0,"end_angle_deg":90}""")]
+    [InlineData("""{"plane_mode":"wcs_xy","profile_type":"arc","radius":5,"start_angle_deg":"x","end_angle_deg":90,"unit":"mm"}""")]
+    public void Sketch_Arc_InvalidInputs_Rejected(string args)
+    {
+        var p = new CreateSketchRequestParser().ParseParameters(args, out var error);
+        Assert.Null(p);
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void Sketch_ExistingTypes_Unchanged_ByLineAndArcAddition()
+    {
+        // rectangle / circle parse exactly as before the line/arc addition.
+        var rect = new CreateSketchRequestParser().ParseParameters(
+            """{"plane_mode":"wcs_xy","profile_type":"rectangle","width":80,"height":40,"unit":"mm"}""",
+            out var error1);
+        Assert.Null(error1);
+        Assert.Equal(SketchProfileType.Rectangle, rect!.ProfileType);
+        Assert.Equal(80, rect.RectangleWidth);
+
+        var circ = new CreateSketchRequestParser().ParseParameters(
+            """{"plane_mode":"wcs_xy","profile_type":"circle","diameter":10,"unit":"mm"}""",
+            out var error2);
+        Assert.Null(error2);
+        Assert.Equal(SketchProfileType.Circle, circ!.ProfileType);
+        Assert.Equal(10, circ.CircleDiameter);
+    }
+
+    [Fact]
+    public void Sketch_Schema_IncludesLineAndArc()
+    {
+        Assert.Contains("\"line\"", CreateSketchTool.ParametersJsonSchema);
+        Assert.Contains("\"arc\"", CreateSketchTool.ParametersJsonSchema);
+        Assert.Contains("start_u", CreateSketchTool.ParametersJsonSchema);
+        Assert.Contains("radius", CreateSketchTool.ParametersJsonSchema);
+        Assert.Contains("start_angle_deg", CreateSketchTool.ParametersJsonSchema);
+        // Parser KnownFields must stay in sync with the schema (both directions).
+        var schemaFields = CreateSketchTool.ParametersJsonSchema;
+        Assert.Contains("end_v", schemaFields);
+    }
+
     [Theory]
     [InlineData("""{"plane_mode":"wcs_xy","profile_type":"rectangle","width":-5,"height":40,"unit":"mm"}""")]
     [InlineData("""{"plane_mode":"wcs_xy","profile_type":"circle","diameter":0,"unit":"mm"}""")]

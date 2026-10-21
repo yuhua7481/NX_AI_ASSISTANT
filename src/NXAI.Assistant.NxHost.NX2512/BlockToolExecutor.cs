@@ -112,12 +112,21 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                 $"verify: {(verification.Success ? "ok" : "FAILED " + verification.Reason)}");
             if (verification.Success)
             {
+                // The real body reference MUST reach the model in DetailsJson:
+                // follow-up boolean tools can only resolve references the
+                // host actually returned (2026-10-21 live failure — the model
+                // invented "block_1" because no newBodyRef was ever sent).
                 return CreateBlockExecutionResult.Success(
                     verification.LengthMm, verification.WidthMm, verification.HeightMm,
                     $"已在工作部件中创建长方体，实测尺寸 " +
                     $"{verification.LengthMm:F3} × {verification.WidthMm:F3} × {verification.HeightMm:F3} 毫米" +
-                    $"（请求 {parameters.Length} × {parameters.Width} × {parameters.Height} 毫米）。",
-                    workPartIdentity);
+                    $"（请求 {parameters.Length} × {parameters.Width} × {parameters.Height} 毫米，" +
+                    $"实体引用 {verification.BodyRef}）。",
+                    workPartIdentity,
+                    System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
+                    {
+                        ["newBodyRef"] = verification.BodyRef,
+                    }));
             }
 
             // The created geometry does not match the request: undo rather than
@@ -306,8 +315,13 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                     verification.LengthMm, verification.WidthMm, verification.HeightMm,
                     $"已在工作部件中创建圆柱体，实测包围盒 " +
                     $"{verification.LengthMm:F3} × {verification.WidthMm:F3} × {verification.HeightMm:F3} 毫米" +
-                    $"（请求直径 {parameters.Diameter} × 高 {parameters.Height} 毫米，轴向 +Z）。",
-                    workPartIdentity);
+                    $"（请求直径 {parameters.Diameter} × 高 {parameters.Height} 毫米，轴向 +Z，" +
+                    $"实体引用 {verification.BodyRef}）。",
+                    workPartIdentity,
+                    System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
+                    {
+                        ["newBodyRef"] = verification.BodyRef,
+                    }));
             }
 
             (bool undone, string undoError) = Rollback(session, markId, "NXAI 创建圆柱体");
@@ -377,7 +391,8 @@ public sealed partial class NxToolExecutor : INxToolExecutor
         Rollback(session, markId, "NXAI 创建长方体");
 
     private readonly record struct VerificationResult(
-        bool Success, double LengthMm, double WidthMm, double HeightMm, string Reason);
+        bool Success, double LengthMm, double WidthMm, double HeightMm, string Reason,
+        string? BodyRef = null);
 
     /// <summary>
     /// Postcondition check against real geometry: exactly one body must have
@@ -426,7 +441,7 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                 $"{expectedLength} × {expectedWidth} × {expectedHeight} 毫米不符");
         }
 
-        return new VerificationResult(true, lx, wy, lz, "");
+        return new VerificationResult(true, lx, wy, lz, "", newBody.JournalIdentifier);
     }
 
     private static bool WithinTolerance(double actual, double expected) =>
@@ -501,8 +516,13 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                 return CreateBlockExecutionResult.Success(
                     verification.LengthMm, verification.WidthMm, verification.HeightMm,
                     $"已在工作部件中创建{shapeDesc}，实测包围盒 " +
-                    $"{verification.LengthMm:F3} × {verification.WidthMm:F3} × {verification.HeightMm:F3} 毫米（轴向 +Z）。",
-                    workPartIdentity);
+                    $"{verification.LengthMm:F3} × {verification.WidthMm:F3} × {verification.HeightMm:F3} 毫米（轴向 +Z，" +
+                    $"实体引用 {verification.BodyRef}）。",
+                    workPartIdentity,
+                    System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
+                    {
+                        ["newBodyRef"] = verification.BodyRef,
+                    }));
             }
 
             (bool undone, string undoError) = Rollback(session, markId, $"NXAI 创建{shapeName}");
@@ -580,8 +600,12 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                     verification.LengthMm, verification.WidthMm, verification.HeightMm,
                     $"已在工作部件中创建球体，实测包围盒 " +
                     $"{verification.LengthMm:F3} × {verification.WidthMm:F3} × {verification.HeightMm:F3} 毫米" +
-                    $"（请求直径 {parameters.Diameter} 毫米）。",
-                    workPartIdentity);
+                    $"（请求直径 {parameters.Diameter} 毫米，实体引用 {verification.BodyRef}）。",
+                    workPartIdentity,
+                    System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
+                    {
+                        ["newBodyRef"] = verification.BodyRef,
+                    }));
             }
 
             (bool undone, string undoError) = Rollback(session, markId, "NXAI 创建球体");
@@ -659,7 +683,7 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                 $"包围盒 {lx:F3} × {wy:F3} × {lz:F3} 毫米与请求 底面直径{expectedBaseDiameter} × 高{expectedHeight} 毫米不符");
         }
 
-        return new VerificationResult(true, lx, wy, lz, "");
+        return new VerificationResult(true, lx, wy, lz, "", newBody.JournalIdentifier);
     }
 
     /// <summary>
@@ -709,7 +733,7 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                 $"包围盒 {lx:F3} × {wy:F3} × {lz:F3} 毫米与请求 直径{expectedDiameter} 毫米不符");
         }
 
-        return new VerificationResult(true, lx, wy, lz, "");
+        return new VerificationResult(true, lx, wy, lz, "", newBody.JournalIdentifier);
     }
 
     /// <summary>
@@ -875,8 +899,13 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                     $"已在选中面的中心创建圆柱体（面中心 " +
                     $"({center[0]:F3}, {center[1]:F3}, {center[2]:F3})，轴向沿面法向 " +
                     $"({normal[0]:F3}, {normal[1]:F3}, {normal[2]:F3})，" +
-                    $"直径 {parameters.Diameter} × 高 {parameters.Height} 毫米）。",
-                    workPartIdentity);
+                    $"直径 {parameters.Diameter} × 高 {parameters.Height} 毫米，" +
+                    $"实体引用 {verification.BodyRef}）。",
+                    workPartIdentity,
+                    System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
+                    {
+                        ["newBodyRef"] = verification.BodyRef,
+                    }));
             }
 
             (bool undone, string undoError) = Rollback(session, markId, "NXAI 创建圆柱体（选中面）");
@@ -959,7 +988,7 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                 return new VerificationResult(false, lx, wy, lz,
                     $"新实体包围盒 {lx:F3} × {wy:F3} × {lz:F3} 超出面相对圆柱的尺寸上限");
             }
-            return new VerificationResult(true, lx, wy, lz, "");
+            return new VerificationResult(true, lx, wy, lz, "", newBody.JournalIdentifier);
         }
         catch (Exception ex)
         {
@@ -1007,7 +1036,7 @@ public sealed partial class NxToolExecutor : INxToolExecutor
                 $"包围盒 {lx:F3} × {wy:F3} × {lz:F3} 毫米与请求 直径{expectedDiameter} × 高{expectedHeight} 毫米不符");
         }
 
-        return new VerificationResult(true, lx, wy, lz, "");
+        return new VerificationResult(true, lx, wy, lz, "", newBody.JournalIdentifier);
     }
 
     /// <summary>

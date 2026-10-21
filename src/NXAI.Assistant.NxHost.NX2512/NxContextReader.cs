@@ -150,12 +150,8 @@ public sealed class NxContextReader
                     Point = new NxPointInfo(point.Coordinates.X, point.Coordinates.Y, point.Coordinates.Z),
                 };
             case NXOpen.Features.Feature feature:
-                return new NxSelectionItem
-                {
-                    Kind = "feature",
-                    Name = SafeName(feature),
-                    Feature = new NxFeatureInfo(feature.GetType().Name, feature.Name),
-                };
+                return DescribeFeature(feature);
+
             case DatumPlane:
                 return new NxSelectionItem { Kind = "datum_plane", Name = SafeName(obj) };
             case DatumAxis:
@@ -191,6 +187,64 @@ public sealed class NxContextReader
                     Subtype = obj.GetType().Name,
                     Name = SafeJournalId(obj),
                 };
+        }
+    }
+
+    /// <summary>
+    /// Maps a selected FEATURE node to its actual output body reference
+    /// (2026-10-21 live failure: the user selected a block and a cylinder;
+    /// the context only showed feature names, so the model invented refs
+    /// like "Cylinder"). Uses the verified Feature.GetBodies
+    /// ("bodies created by the feature"). The reference is offered ONLY when
+    /// the feature resolves to EXACTLY ONE alive, solid body; zero, multiple,
+    /// sheet or unreadable outputs are recorded as unresolvable — never
+    /// guessed, and the feature display name is never disguised as a body ref.
+    /// </summary>
+    private static NxSelectionItem DescribeFeature(NXOpen.Features.Feature feature)
+    {
+        string? bodyRef = null;
+        int bodyCount = 0;
+        try
+        {
+            if (!IsDeadFeature(feature) && !feature.Suppressed)
+            {
+                var bodies = feature.GetBodies().Where(b => !IsDeadFeature(b)).ToArray();
+                bodyCount = bodies.Length;
+                if (bodyCount == 1 && !bodies[0].IsSheetBody)
+                    bodyRef = bodies[0].JournalIdentifier;
+            }
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("context.feature_bodies",
+                $"FAILED: {feature.GetType().Name}: {ex.Message}");
+            bodyCount = 0;
+        }
+        if (bodyRef == null)
+        {
+            PhaseLog.Write("context.feature_bodies",
+                $"feature={SafeJournalId(feature)} type={feature.GetType().Name} outputs={bodyCount} -> unresolvable");
+        }
+
+        return new NxSelectionItem
+        {
+            Kind = "feature",
+            Name = SafeName(feature),
+            Feature = new NxFeatureInfo(feature.GetType().Name, feature.Name, bodyRef, bodyCount),
+        };
+    }
+
+    private static bool IsDeadFeature(NXObject obj)
+    {
+        try
+        {
+            _ = obj.Tag;
+            _ = obj.IsOccurrence;
+            return false;
+        }
+        catch
+        {
+            return true;
         }
     }
 

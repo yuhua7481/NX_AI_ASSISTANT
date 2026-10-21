@@ -99,8 +99,9 @@ public static class BooleanResultVerificationPolicy
             {
                 string op = facts.Operation == BooleanOperationType.Subtract ? "差集" : "交集";
                 return new(BooleanVerificationOutcome.NoEffect,
-                    $"{op}已提交但未产生几何效果：工具体与目标体没有实际相交的体积" +
-                    "（NX 完成运算但模型无变化，工具体保留）。", null);
+                    $"{op}已提交但未观察到可验证的几何效果：实体数量未变化、两个输入体均存活、" +
+                    "目标体包围盒未变化（这些事实不能单独证明工具体与目标体互不相交，" +
+                    "只能说明本次提交没有产生可确认的模型改变）。", null);
             }
             return new(BooleanVerificationOutcome.Failure,
                 "实体数量未减少，且部件状态既不符合布尔生效也不符合无效果的特征。", null);
@@ -128,9 +129,14 @@ public static class BooleanResultVerificationPolicy
 
         return facts.Operation switch
         {
-            BooleanOperationType.Unite => Contains(result, target)
+            // Unite must contain BOTH inputs' boxes (necessary condition — a
+            // partial-overlap unite can only grow or keep each input's extent).
+            BooleanOperationType.Unite => Contains(result, target) && Contains(result, tool)
                 ? (true, "")
-                : (false, "并集结果包围盒不包含目标体包围盒"),
+                : (false, "并集结果包围盒未同时包含目标体与工具体包围盒"),
+            // Necessary conditions only: box containment cannot prove full
+            // geometric correctness; volume-level equality stays a live
+            // acceptance item.
             BooleanOperationType.Subtract => Contains(target, result)
                 ? (true, "")
                 : (false, "差集结果包围盒未保持在目标体范围内"),

@@ -427,6 +427,28 @@ public sealed class ChatSessionController : IDisposable
         }
         else if (!string.IsNullOrWhiteSpace(finalText))
         {
+            // Modeling-claim guard (2026-10-21 root cause): a turn with NO
+            // tool executions whose text still claims modeling success
+            // (e.g. reusing a prior SUBTRACT(3)) must not become the
+            // displayed fact; a turn whose executions ALL failed must not be
+            // overwritten into success. Decisions come only from this
+            // turn's structured receipts — history is never evidence.
+            var guardVerdict = ModelingClaimGuard.Evaluate(
+                finalText,
+                turnExecutions.Select(e => (e.ToolName, e.Result.Status.ToWireName())).ToList());
+            if (guardVerdict.ShouldBlock)
+            {
+                _chatLog.Add(ChatRole.Info, "[系统核实] 模型文本声称建模成功，但与本轮真实执行记录不符，已拦截展示。");
+                _chatLog.Add(ChatRole.Assistant, guardVerdict.ReplacementMessage ?? "");
+                // Never drop the real failure reasons: append the structured
+                // failure summary when the turn had failed executions (the
+                // zero-execution case has no failures to summarize).
+                var failureSummary = DescribeTurnExecutions(turnExecutions);
+                if (failureSummary.Contains("未执行/失败"))
+                    _chatLog.Add(ChatRole.Assistant, failureSummary);
+                RequestCompleted?.Invoke(this, EventArgs.Empty);
+                return;
+            }
             // Model's own text is shown as-is (tool-confirmation paths rely
             // on the exact reply). When this turn executed tools, the
             // controller appends its own assistant-role record afterwards so
