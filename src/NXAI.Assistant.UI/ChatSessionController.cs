@@ -47,6 +47,54 @@ public sealed class ChatSessionController : IDisposable
     public const int DefaultMaxOutboundMessages = 20;
 
     /// <summary>
+    /// 2026-10-23 live fix: model output that carries tool-protocol markup
+    /// (a complete invoke block the tag adapter already consumed, or a
+    /// stray/partial tag) must never reach the visible chat as assistant
+    /// text. The model's own message round-trips through the protocol as a
+    /// structured tool_calls entry — its raw markup is not conversation
+    /// content. Everything displayed (final text, error text, receipts)
+    /// passes through this sanitizer: complete blocks are removed with the
+    /// surrounding text kept, stray openers replace the tag with a short
+    /// notice so the protocol grammar never renders raw.
+    /// </summary>
+    internal static string SanitizeModelTextForDisplay(string text)
+    {
+        if (string.IsNullOrEmpty(text) || !ToolTagProtocol.ContainsToolMarker(text))
+            return text;
+        var scan = ToolTagProtocol.Scan(text);
+        if (scan.ProtocolError == null)
+        {
+            if (scan.ToolCall != null)
+            {
+                // A complete invoke block. CleanText keeps any prose around
+                // it; when that prose itself still carries residue (e.g.
+                // stray parameter tags), scrub it too.
+                string prose = scan.CleanText ?? "";
+                if (ToolTagProtocol.ContainsToolMarker(prose))
+                    prose = ToolTagProtocol.StripInvokeMarkup(prose);
+                return prose.Length > 0
+                    ? prose
+                    : "[已省略：此条回复中的工具调用内容不作为聊天文本显示]";
+            }
+            // ContainsToolMarker true but Scan found no block: stray
+            // parameter tags without a wrapper — strip them.
+            string scrubbed = ToolTagProtocol.StripInvokeMarkup(text);
+            if (string.IsNullOrWhiteSpace(scrubbed))
+                return "[模型返回了无法解析的工具调用内容，已省略原始协议文本]";
+            return scrubbed.Contains("parameter") &&
+                   ToolTagProtocol.ContainsToolMarker(scrubbed)
+                ? scrubbed + "\n[此条回复中的工具调用标记已省略]"
+                : scrubbed;
+        }
+        // Malformed block (unclosed, multi, junk): replace the markup with
+        // a concise notice, keep any surrounding prose.
+        string prose2 = ToolTagProtocol.StripInvokeMarkup(text);
+        if (string.IsNullOrWhiteSpace(prose2))
+            return "[模型返回了无法解析的工具调用内容，已省略原始协议文本]";
+        return prose2 + "\n[此条回复中的工具调用标记已省略]";
+    }
+
+    /// <summary>
     /// Model responses allowed per user turn. Phase 7.3.2: the cap now
     /// covers a limited serial chain — response 1 may request a tool call
     /// (e.g. create_sketch), response 2 another single tool call fed the
@@ -92,6 +140,12 @@ public sealed class ChatSessionController : IDisposable
     private bool _inFlight;
     private bool _detached;
 
+    /// <summary>(tool name, exact arguments JSON) of calls that failed
+    /// PARAMETER validation this turn. A byte-identical resubmission is
+    /// refused before parsing — the failure is deterministic, only a
+    /// corrected call (different JSON) can proceed. Cleared each turn.</summary>
+    private readonly HashSet<(string Tool, string Args)> _failedParameterCallsThisTurn = new();
+
     /// <summary>Raised when a request starts; the UI should enter its busy state.</summary>
     public event EventHandler? RequestStarted;
 
@@ -131,6 +185,42 @@ public sealed class ChatSessionController : IDisposable
         _toolRegistry = toolExecutor != null
             ? CreateBlockTool.CreateRegistry()
             : new ToolRegistry();
+        // Wire the executor's edge-finish auto-target candidate to THIS
+        // controller's session state: the most recent executor-verified
+        // body reference lives here (new conversations start empty — the
+        // target must be re-established from the live model, not memory).
+        if (_toolExecutor is NxTargetResolutionSink sink)
+        {
+            sink.LastCreatedBodyRefProvider = () => LastCreatedBodyRef;
+            sink.LastCreatedFeatureRefProvider = () => LastCreatedFeatureRef;
+        }
+    }
+
+    /// <summary>
+    /// Phase 9.5: the body reference (JournalIdentifier, e.g. "BLOCK(5)")
+    /// of the most recent SUCCESSFUL body-creating tool result in THIS
+    /// conversation — executor-verified only. Cleared on NewConversation
+    /// (the model state may have changed; the target is re-established
+    /// from the live part, never from stale memory). Null before any
+    /// successful body-creating result.
+    /// </summary>
+    public string? LastCreatedBodyRef { get; private set; }
+
+    /// <summary>
+    /// Phase 9.6: the FEATURE reference (JournalIdentifier, e.g.
+    /// "COUNTERSUNK SCREW HOLE(2)") of the most recent SUCCESSFUL
+    /// feature-creating tool result in THIS conversation — executor-verified
+    /// only. Feeds the linear-pattern FEATURE mode.
+    /// </summary>
+    public string? LastCreatedFeatureRef { get; private set; }
+
+    /// <summary>Clears the remembered auto-target candidate (new
+    /// conversation). The NEXT empty-selection request must re-resolve the
+    /// target from the live model or be refused — never reuse stale refs.</summary>
+    public void ResetTargetResolution()
+    {
+        LastCreatedBodyRef = null;
+        LastCreatedFeatureRef = null;
     }
 
     public bool IsRequestInFlight => _inFlight;
@@ -204,6 +294,7 @@ public sealed class ChatSessionController : IDisposable
         }
 
         _inFlight = true;
+        _failedParameterCallsThisTurn.Clear();
         var cts = new CancellationTokenSource();
         _cts = cts;
         _chatLog.Add(ChatRole.User, userText);
@@ -375,6 +466,24 @@ public sealed class ChatSessionController : IDisposable
 
                     var execution = await ProcessToolCallAsync(call, cancellationToken, sketchesThisTurn, revolveAxisCorrections);
                     turnExecutions.Add((call.FunctionName, execution));
+                    // Deterministic failures are remembered as (tool, exact
+                    // args) so an identical resubmission in this turn is
+                    // refused before it runs again:
+                    //   - InvalidParameters: the call itself is malformed;
+                    //   - VerificationFailed/ExecutionFailed WITH rolledBack:
+                    //     the executor already undid its work — the part is
+                    //     byte-for-byte back at the pre-call state (the
+                    //     2026-10-23 T1 second failure: the model retried the
+                    //     identical call after a rolled-back NRE and failed
+                    //     identically 40s later). A retry is legitimate only
+                    //     after a REAL precondition change, which inside one
+                    //     turn cannot come from the model — the user must act
+                    //     (new turn) or the parameters must change.
+                    if (execution.Status == ToolExecutionStatus.InvalidParameters ||
+                        ((execution.Status == ToolExecutionStatus.VerificationFailed ||
+                          execution.Status == ToolExecutionStatus.ExecutionFailed) &&
+                         execution.RolledBack))
+                        _failedParameterCallsThisTurn.Add((call.FunctionName, call.ArgumentsJson));
                     TrackSketchForRevolveAdvice(call.FunctionName, execution, sketchesThisTurn);
                     protocol.Add(new OutboundMessage(OutboundMessage.RoleTool,
                         BuildToolResultPayload(execution), ToolCallId: call.Id));
@@ -407,7 +516,7 @@ public sealed class ChatSessionController : IDisposable
             turnExecutions.Count > 0)
         {
             if (errorText != null)
-                _chatLog.Add(ChatRole.Error, errorText);
+                _chatLog.Add(ChatRole.Error, SanitizeModelTextForDisplay(errorText));
             _chatLog.Add(ChatRole.Info,
                 DescribeInterruptedTurnOutcome(turnExecutions, canceled, null));
             _chatLog.Add(ChatRole.Assistant,
@@ -423,7 +532,9 @@ public sealed class ChatSessionController : IDisposable
         }
         else if (errorText != null)
         {
-            _chatLog.Add(ChatRole.Error, errorText);
+            // The error card is user-visible: any model-supplied fragment
+            // inside the message is scrubbed of protocol markup first.
+            _chatLog.Add(ChatRole.Error, SanitizeModelTextForDisplay(errorText));
         }
         else if (!string.IsNullOrWhiteSpace(finalText))
         {
@@ -449,11 +560,12 @@ public sealed class ChatSessionController : IDisposable
                 RequestCompleted?.Invoke(this, EventArgs.Empty);
                 return;
             }
-            // Model's own text is shown as-is (tool-confirmation paths rely
-            // on the exact reply). When this turn executed tools, the
+            // Model's own text is shown sanitized (tool-protocol markup
+            // stripped — 2026-10-23): the raw invoke block is protocol
+            // content, not chat prose. When this turn executed tools, the
             // controller appends its own assistant-role record afterwards so
             // a contradicting model text can never overwrite what really ran.
-            _chatLog.Add(ChatRole.Assistant, finalText);
+            _chatLog.Add(ChatRole.Assistant, SanitizeModelTextForDisplay(finalText));
             var receipt = DescribeTurnExecutions(turnExecutions);
             if (receipt.Length > 0)
                 _chatLog.Add(ChatRole.Assistant, receipt);
@@ -556,6 +668,23 @@ public sealed class ChatSessionController : IDisposable
         Dictionary<string, RevolveAxisAdvisor.SketchFacts> sketchesThisTurn,
         ScopedInt revolveAxisCorrections)
     {
+        // 2026-10-23 live fix: a PARAMETER error is deterministic — the same
+        // call with byte-identical arguments fails the same way. Re-running
+        // it inside one turn can only repeat the failure (the live incident:
+        // an unknown "target" field refused, then resubmitted unchanged).
+        // The guard keys on (tool, exact arguments) and refuses the repeat
+        // with an explicit correction demand; a genuinely different retry
+        // has different JSON and passes. Non-parameter failures (target
+        // resolution, NX state) are NOT deduplicated: the model may retry
+        // after a legitimate state change (e.g. the user selects a body).
+        if (_failedParameterCallsThisTurn.Contains((call.FunctionName, call.ArgumentsJson)))
+        {
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.InvalidParameters,
+                $"工具 {call.FunctionName} 已在本轮用完全相同的参数失败过（确定性错误不会因原样重试而改变；" +
+                "上次失败的操作已回滚，部件未改变）。请修正参数后重新调用，或直接向用户说明问题；" +
+                "用户下一步操作后（新回合）可重新尝试。");
+        }
         if (!_toolRegistry.IsRegistered(call.FunctionName))
         {
             return CreateBlockExecutionResult.Failure(
@@ -571,7 +700,14 @@ public sealed class ChatSessionController : IDisposable
             call.FunctionName != CreateSketchTool.Name &&
             call.FunctionName != CreateExtrudeTool.Name &&
             call.FunctionName != CreateRevolveTool.Name &&
-            call.FunctionName != BooleanOperationTool.Name)
+            call.FunctionName != BooleanOperationTool.Name &&
+            call.FunctionName != CreateHoleTool.Name &&
+            call.FunctionName != EdgeFinishToolContract.FilletName &&
+            call.FunctionName != EdgeFinishToolContract.ChamferName &&
+            call.FunctionName != LinearPatternToolContract.Name &&
+            call.FunctionName != CircularPatternToolContract.Name &&
+            call.FunctionName != MirrorToolContract.Name &&
+            !StandardHoleFamilyForTool(call.FunctionName).HasValue)
         {
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.UnknownTool,
@@ -807,7 +943,7 @@ public sealed class ChatSessionController : IDisposable
                 $"旋转体：草图 {revolveParameters.SketchRef}，轴 {DescribeRevolveAxis(revolveParameters.AxisMode)}，{FormatNumber(revolveParameters.AngleDeg)} 度。";
             request = ToolConfirmationRequest.ForRevolve(call.Id, call.FunctionName, revolveParameters);
         }
-        else
+        else if (call.FunctionName == BooleanOperationTool.Name)
         {
             var booleanParameters = new BooleanOperationRequestParser()
                 .ParseParameters(call.ArgumentsJson, out string? parseError);
@@ -828,6 +964,199 @@ public sealed class ChatSessionController : IDisposable
                 $"布尔{opText}：目标体 {booleanParameters.TargetBodyRef}，工具体 {booleanParameters.ToolBodyRef}" +
                 "（运算后工具体被消耗，结果归属目标体）。";
             request = ToolConfirmationRequest.ForBoolean(call.Id, call.FunctionName, booleanParameters);
+        }
+        else if (call.FunctionName == CreateHoleTool.Name)
+        {
+            var holeParameters = new CreateHoleRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (holeParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            string locationText = holeParameters.LocationU == 0 && holeParameters.LocationV == 0
+                ? "面中心"
+                : $"面中心偏移 (u {FormatNumber(holeParameters.LocationU)}, v {FormatNumber(holeParameters.LocationV)}) 毫米";
+            requestDescription =
+                $"简单盲孔：直径 {FormatNumber(holeParameters.Diameter)} × 深 {FormatNumber(holeParameters.Depth)} 毫米" +
+                $"（钻尖角 {FormatNumber(holeParameters.TipAngleDeg)}°，孔位 {locationText}），" +
+                $"放置面 {holeParameters.PlacementFaceRef}。";
+            request = ToolConfirmationRequest.ForHole(call.Id, call.FunctionName, holeParameters);
+        }
+        else if (StandardHoleFamilyForTool(call.FunctionName) is { } stdFamily)
+        {
+            var stdParameters = new CreateStandardHoleRequestParser(call.FunctionName, stdFamily)
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (stdParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+
+            string familyText = stdFamily switch
+            {
+                StandardHoleFamily.Threaded => "螺纹孔",
+                StandardHoleFamily.SimpleClearance => "螺纹间隙孔",
+                StandardHoleFamily.Counterbored => "沉头孔（Counterbored）",
+                _ => "埋头孔（Countersink）",
+            };
+            string depthText = stdFamily switch
+            {
+                StandardHoleFamily.Threaded when stdParameters.HoleDepthMm is { } hd && stdParameters.ThreadDepthMm is { } td =>
+                    $"，孔深 {FormatNumber(hd)} × 螺纹深 {FormatNumber(td)} 毫米",
+                StandardHoleFamily.Threaded => "，深度用标准表参考值",
+                StandardHoleFamily.SimpleClearance when stdParameters.HoleDepthMm is { } sd =>
+                    $"，孔深 {FormatNumber(sd)} 毫米",
+                StandardHoleFamily.SimpleClearance => "，孔径/倒角/尖角按标准表",
+                _ => "，全部尺寸按标准表",
+            };
+            string locationText = stdParameters.PlacementMode == StandardHolePlacementMode.SelectedPoint
+                ? "选定点（孔心=该点，放置面由宿主解析）"
+                : stdParameters.LocationU == 0 && stdParameters.LocationV == 0
+                    ? "面中心"
+                    : $"面中心偏移 (u {FormatNumber(stdParameters.LocationU)}, v {FormatNumber(stdParameters.LocationV)}) 毫米";
+            string placementText = stdParameters.PlacementMode == StandardHolePlacementMode.SelectedPoint
+                ? "放置：选定点"
+                : $"放置面 {stdParameters.PlacementFaceRef}";
+            requestDescription =
+                $"标准{familyText}：规格 {stdParameters.Size}{depthText}（孔位 {locationText}），{placementText}。";
+            request = ToolConfirmationRequest.ForStandardHole(call.Id, call.FunctionName, stdParameters);
+        }
+        else if (call.FunctionName == EdgeFinishToolContract.FilletName)
+        {
+            var filletParameters = new CreateFilletRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (filletParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未修改任何几何。{parseError}");
+            }
+            requestDescription =
+                $"边倒圆：半径 {FormatNumber(filletParameters.RadiusMm)} 毫米，" +
+                "目标为当前选中的实体边（执行时重新验证，确认卡由宿主显示实际边数）。";
+            request = ToolConfirmationRequest.ForEdgeFinish(call.Id, call.FunctionName, null, filletParameters);
+        }
+        else if (call.FunctionName == EdgeFinishToolContract.ChamferName)
+        {
+            var chamferParameters = new CreateChamferRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (chamferParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未修改任何几何。{parseError}");
+            }
+            requestDescription =
+                $"倒斜角：对称距离 {FormatNumber(chamferParameters.DistanceMm)} 毫米（C 形等距倒角），" +
+                "目标为当前选中的实体边（执行时重新验证，确认卡由宿主显示实际边数）。";
+            request = ToolConfirmationRequest.ForEdgeFinish(call.Id, call.FunctionName, chamferParameters, null);
+        }
+        else if (call.FunctionName == LinearPatternToolContract.Name)
+        {
+            var patternParameters = new CreateLinearPatternRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (patternParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+            string modeText = patternParameters.Mode == LinearPatternMode.Feature
+                ? "阵列特征（最近创建的特征，或从部件特征树重新识别）"
+                : "阵列几何体（最近创建的实体）";
+            string dirText = patternParameters.Direction switch
+            {
+                LinearPatternDirection.PlusX => "+X",
+                LinearPatternDirection.MinusX => "-X",
+                LinearPatternDirection.PlusY => "+Y",
+                LinearPatternDirection.MinusY => "-Y",
+                LinearPatternDirection.PlusZ => "+Z",
+                _ => "-Z",
+            };
+            if (patternParameters.Direction2 != null)
+            {
+                string dir2Text = patternParameters.Direction2 switch
+                {
+                    LinearPatternDirection.PlusX => "+X",
+                    LinearPatternDirection.MinusX => "-X",
+                    LinearPatternDirection.PlusY => "+Y",
+                    LinearPatternDirection.MinusY => "-Y",
+                    LinearPatternDirection.PlusZ => "+Z",
+                    _ => "-Z",
+                };
+                requestDescription =
+                    $"线性阵列（双向）：{modeText}，方向 {dirText} {patternParameters.Count} 个 × " +
+                    $"方向 {dir2Text} {patternParameters.Count2} 个" +
+                    $"（间距 {FormatNumber(patternParameters.PitchMm)} / {FormatNumber(patternParameters.Pitch2Mm ?? 0)} 毫米，" +
+                    $"一次原生矩形阵列共 {patternParameters.Count * patternParameters.Count2!.Value} 个实例）。" +
+                    "目标由宿主自动解析并重新验证。";
+            }
+            else
+            {
+                requestDescription =
+                    $"线性阵列：{modeText}，方向 {dirText}，共 {patternParameters.Count} 个实例" +
+                    $"（间距 {FormatNumber(patternParameters.PitchMm)} 毫米）。目标由宿主自动解析并重新验证。";
+            }
+            request = ToolConfirmationRequest.ForLinearPattern(call.Id, call.FunctionName, patternParameters);
+        }
+        else if (call.FunctionName == CircularPatternToolContract.Name)
+        {
+            var circularParameters = new CreateCircularPatternRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (circularParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+            string cirModeText = circularParameters.Mode == CircularPatternMode.Feature
+                ? "环形阵列特征（最近创建的特征，或从部件特征树重新识别）"
+                : "环形阵列几何体（最近创建的实体，或当前选中的实体）";
+            string cirAxisText = circularParameters.Axis switch
+            {
+                CircularPatternAxis.PlusX => "+X 轴（过原点）",
+                CircularPatternAxis.PlusY => "+Y 轴（过原点）",
+                CircularPatternAxis.PlusZ => "+Z 轴（过原点）",
+                CircularPatternAxis.DatumAxis => "当前选中的基准轴",
+                _ => "当前选中的直线（边或直线特征）",
+            };
+            string cirAngleText = circularParameters.TotalAngleDeg is { } deg
+                ? $"总角度 {deg:0.###}°（相邻实例角距约 {deg / (circularParameters.Count - 1):0.###}°）"
+                : $"完整圆周 360°（相邻实例角距 {360.0 / circularParameters.Count:0.###}°）";
+            requestDescription =
+                $"环形阵列：{cirModeText}，旋转轴 {cirAxisText}，共 {circularParameters.Count} 个实例（含原始实例），{cirAngleText}。" +
+                "目标与轴对象由宿主解析并重新验证（绝对轴/选中的基准轴/选中的直线边）。";
+            request = ToolConfirmationRequest.ForCircularPattern(call.Id, call.FunctionName, circularParameters);
+        }
+        else if (call.FunctionName == MirrorToolContract.Name)
+        {
+            var mirrorParameters = new CreateMirrorRequestParser()
+                .ParseParameters(call.ArgumentsJson, out string? parseError);
+            if (mirrorParameters == null)
+            {
+                return CreateBlockExecutionResult.Failure(
+                    ToolExecutionStatus.InvalidParameters,
+                    $"参数校验未通过，未创建任何几何。{parseError}");
+            }
+            string mirModeText = mirrorParameters.Mode == MirrorMode.Geometry
+                ? "镜像几何体（选中的实体，可多个；原实体保留）"
+                : "镜像特征（选中的建模特征，可多个；历史保留）";
+            requestDescription =
+                $"镜像：{mirModeText}。待镜像对象与镜像面（基准面或平面面）均由宿主从当前选区解析" +
+                "（对象与镜像面按角色分离，执行时重新验证）。";
+            request = ToolConfirmationRequest.ForMirror(call.Id, call.FunctionName, mirrorParameters);
+        }
+        else
+        {
+            // The tool-name gate above guarantees every registered modeling
+            // tool has a branch; this is unreachable in practice.
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.UnknownTool,
+                $"工具 {call.FunctionName} 没有对应的执行器，本次请求未执行。");
         }
 
         // Authorization decision at the backend dispatch stage — read the
@@ -1097,6 +1426,20 @@ public sealed class ChatSessionController : IDisposable
                     request.ExtrudeParameters!, expectedWorkPartFullPath),
                 ToolParametersKind.Revolve => _toolExecutor!.ExecuteCreateRevolve(
                     request.RevolveParameters!, expectedWorkPartFullPath),
+                ToolParametersKind.Hole => _toolExecutor!.ExecuteCreateHole(
+                    request.HoleParameters!, expectedWorkPartFullPath),
+                ToolParametersKind.StandardHole => _toolExecutor!.ExecuteCreateStandardHole(
+                    request.StandardHoleParameters!, expectedWorkPartFullPath),
+                ToolParametersKind.Fillet => _toolExecutor!.ExecuteCreateFillet(
+                    request.FilletParameters!, expectedWorkPartFullPath),
+                ToolParametersKind.Chamfer => _toolExecutor!.ExecuteCreateChamfer(
+                    request.ChamferParameters!, expectedWorkPartFullPath),
+                ToolParametersKind.LinearPattern => _toolExecutor!.ExecuteCreateLinearPattern(
+                    request.LinearPatternParameters!, expectedWorkPartFullPath),
+                ToolParametersKind.CircularPattern => _toolExecutor!.ExecuteCreateCircularPattern(
+                    request.CircularPatternParameters!, expectedWorkPartFullPath),
+                ToolParametersKind.Mirror => _toolExecutor!.ExecuteCreateMirror(
+                    request.MirrorParameters!, expectedWorkPartFullPath),
                 _ => _toolExecutor!.ExecuteBooleanOperation(
                     request.BooleanParameters!, expectedWorkPartFullPath),
             };
@@ -1104,6 +1447,21 @@ public sealed class ChatSessionController : IDisposable
             // structured failure); record it immediately, never later in the
             // turn, so a Detach cannot erase it.
             ledgerIdAndResultCheck(ledgerId, result);
+            // Phase 9.5: remember the most recent SUCCESSFUL body-creating
+            // result's body reference (JournalIdentifier form, e.g.
+            // "BLOCK(5)") for the edge-finish auto-target resolution. Only
+            // real executor-verified refs are recorded — never model text.
+            if (result.Status == ToolExecutionStatus.Success)
+            {
+                string? createdRef = ExtractDetailsString(result.DetailsJson, "newBodyRef");
+                if (!string.IsNullOrWhiteSpace(createdRef))
+                    LastCreatedBodyRef = createdRef;
+                // Phase 9.6: feature refs (hole/blend/chamfer features) feed
+                // the linear-pattern FEATURE mode; body refs feed GEOMETRY.
+                string? featureRef = ExtractDetailsString(result.DetailsJson, "featureRef");
+                if (!string.IsNullOrWhiteSpace(featureRef))
+                    LastCreatedFeatureRef = featureRef;
+            }
             return result;
         }
         catch
@@ -1121,7 +1479,7 @@ public sealed class ChatSessionController : IDisposable
             _ledger!.RecordResult(ledgerId, result);
     }
 
-    private static string DescribePendingOperation(ToolConfirmationRequest request) =>
+    internal static string DescribePendingOperation(ToolConfirmationRequest request) =>
         request.ParametersKind switch
         {
             ToolParametersKind.Block => $"长方体 {Format(request.BlockParameters!.Length)}×{Format(request.BlockParameters.Width)}×{Format(request.BlockParameters.Height)}mm",
@@ -1131,8 +1489,26 @@ public sealed class ChatSessionController : IDisposable
             ToolParametersKind.Sketch => $"草图 {request.SketchParameters!.ProfileType}",
             ToolParametersKind.Extrude => $"拉伸 {Format(request.ExtrudeParameters!.Distance)}mm",
             ToolParametersKind.Revolve => $"旋转 {Format(request.RevolveParameters!.AngleDeg)}度",
+            ToolParametersKind.Hole => $"孔 直径{Format(request.HoleParameters!.Diameter)} 深{Format(request.HoleParameters.Depth)}mm",
+            ToolParametersKind.StandardHole => $"标准孔 {request.StandardHoleParameters!.Family} {request.StandardHoleParameters.Size}",
+            ToolParametersKind.Fillet => $"圆角 R{Format(request.FilletParameters!.RadiusMm)}mm",
+            ToolParametersKind.Chamfer => $"倒角 C{Format(request.ChamferParameters!.DistanceMm)}mm",
+            ToolParametersKind.LinearPattern => $"线性阵列 {request.LinearPatternParameters!.Count}×{Format(request.LinearPatternParameters.PitchMm)}mm",
+            ToolParametersKind.CircularPattern => $"环形阵列 {request.CircularPatternParameters!.Count}×{request.CircularPatternParameters.Axis}",
+            ToolParametersKind.Mirror => $"镜像 {request.MirrorParameters!.Mode}",
             _ => $"布尔 {request.BooleanParameters!.Operation}",
         };
+
+    /// <summary>Maps a standard-hole tool name to its family; null for any
+    /// other tool name (the single dispatch gate for the four tools).</summary>
+    private static StandardHoleFamily? StandardHoleFamilyForTool(string toolName) => toolName switch
+    {
+        StandardHoleToolContract.ThreadedName => StandardHoleFamily.Threaded,
+        StandardHoleToolContract.ClearanceName => StandardHoleFamily.SimpleClearance,
+        StandardHoleToolContract.CounterboredName => StandardHoleFamily.Counterbored,
+        StandardHoleToolContract.CountersunkName => StandardHoleFamily.Countersunk,
+        _ => null,
+    };
 
     private static string Format(double value) =>
         value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);

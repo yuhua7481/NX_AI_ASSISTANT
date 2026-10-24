@@ -833,6 +833,115 @@ public sealed class AssistantChatForm : Form
                 originText = "运算后工具体被消耗（合并入布尔特征），结果归属目标体";
                 break;
             }
+            case ToolParametersKind.Hole:
+            {
+                var h = request.HoleParameters!;
+                string locText = h.LocationU == 0 && h.LocationV == 0
+                    ? "面中心"
+                    : $"面中心偏移 (u {FormatMm(h.LocationU)}, v {FormatMm(h.LocationV)}) 毫米";
+                operationText = "创建简单盲孔（Simple Hole）";
+                dimensionsText = $"直径：{FormatMm(h.Diameter)} 毫米\n深度：{FormatMm(h.Depth)} 毫米\n钻尖角：{FormatMm(h.TipAngleDeg)}°";
+                originText = $"孔位：{locText}；放置面：{h.PlacementFaceRef}";
+                break;
+            }
+            case ToolParametersKind.Fillet:
+            {
+                var f = request.FilletParameters!;
+                operationText = "边倒圆（Edge Blend，等半径圆角）";
+                dimensionsText = $"半径：{FormatMm(f.RadiusMm)} 毫米";
+                originText = "目标：用户当前选中的实体边（执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.Chamfer:
+            {
+                var c = request.ChamferParameters!;
+                operationText = "倒斜角（Chamfer，对称等距）";
+                dimensionsText = $"距离：{FormatMm(c.DistanceMm)} 毫米（两面对称）";
+                originText = "目标：用户当前选中的实体边（执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.LinearPattern:
+            {
+                var lp = request.LinearPatternParameters!;
+                string modeText = lp.Mode == LinearPatternMode.Feature
+                    ? "线性阵列特征（PatternFeature，本对话最近创建的特征）"
+                    : "线性阵列几何体（PatternGeometry，本对话最近创建的实体）";
+                string dirText = lp.Direction switch
+                {
+                    LinearPatternDirection.PlusX => "+X",
+                    LinearPatternDirection.MinusX => "-X",
+                    LinearPatternDirection.PlusY => "+Y",
+                    LinearPatternDirection.MinusY => "-Y",
+                    LinearPatternDirection.PlusZ => "+Z",
+                    _ => "-Z",
+                };
+                operationText = modeText;
+                dimensionsText = $"方向：{dirText}\n实例总数：{lp.Count}（含原始实例）\n间距：{FormatMm(lp.PitchMm)} 毫米";
+                originText = "目标：宿主自动解析（执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.CircularPattern:
+            {
+                var cp = request.CircularPatternParameters!;
+                string modeText = cp.Mode == CircularPatternMode.Feature
+                    ? "环形阵列特征（PatternFeature）"
+                    : "环形阵列几何体（PatternGeometry）";
+                string axisText = cp.Axis switch
+                {
+                    CircularPatternAxis.PlusX => "+X 轴（过原点）",
+                    CircularPatternAxis.PlusY => "+Y 轴（过原点）",
+                    CircularPatternAxis.PlusZ => "+Z 轴（过原点）",
+                    CircularPatternAxis.DatumAxis => "当前选中的基准轴",
+                    _ => "当前选中的直线（边或直线特征）",
+                };
+                string angleText = cp.TotalAngleDeg is { } deg
+                    ? $"总角度：{deg:0.###}°（最后一实例落在结束角上）"
+                    : "完整圆周 360°（实例均匀分布，首尾不重复）";
+                operationText = modeText;
+                dimensionsText = $"旋转轴：{axisText}\n实例总数：{cp.Count}（含原始实例）\n{angleText}";
+                originText = "目标：宿主自动解析（选区优先，执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.Mirror:
+            {
+                var mp = request.MirrorParameters!;
+                string modeText = mp.Mode == MirrorMode.Geometry
+                    ? "镜像几何体（MirrorBody，原实体保留）"
+                    : "镜像特征（MirrorFeature，历史与参数化保留）";
+                operationText = modeText;
+                dimensionsText = $"待镜像对象：由宿主从当前选区解析（可多个）\n镜像面：由宿主从当前选区解析（基准面或平面面）\n保留原对象：{(mp.KeepOriginal ? "是" : "否")}";
+                originText = "目标：宿主从当前选区解析（对象与镜像面按角色分离，执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.StandardHole:
+            {
+                var s = request.StandardHoleParameters!;
+                string familyText = s.Family switch
+                {
+                    StandardHoleFamily.Threaded => "螺纹孔（Threaded Hole，内螺纹）",
+                    StandardHoleFamily.SimpleClearance => "螺纹间隙孔（Simple Screw Clearance，无内螺纹）",
+                    StandardHoleFamily.Counterbored => "沉头孔（Counterbored，圆柱形平底台阶，ISO 4762）",
+                    _ => "埋头孔（Countersink，锥形斜面，ISO 10642）",
+                };
+                string locText = s.PlacementMode == StandardHolePlacementMode.SelectedPoint
+                    ? "选定点（孔心=该点的真实坐标，放置面由宿主从点所在实体平面解析）"
+                    : s.LocationU == 0 && s.LocationV == 0
+                        ? "面中心"
+                        : $"面中心偏移 (u {FormatMm(s.LocationU)}, v {FormatMm(s.LocationV)}) 毫米";
+                string depthText = s.Family switch
+                {
+                    StandardHoleFamily.Threaded when s.HoleDepthMm is { } hd && s.ThreadDepthMm is { } td =>
+                        $"孔深：{FormatMm(hd)} 毫米\n螺纹深：{FormatMm(td)} 毫米",
+                    StandardHoleFamily.Threaded => "孔深/螺纹深：标准表参考值",
+                    StandardHoleFamily.SimpleClearance when s.HoleDepthMm is { } sd =>
+                        $"孔深：{FormatMm(sd)} 毫米",
+                    _ => "全部尺寸：按 NX 标准表（" + s.Size + "）",
+                };
+                operationText = $"创建{familyText}";
+                dimensionsText = $"规格：{s.Size}\n{depthText}";
+                originText = $"孔位：{locText}；放置面：{s.PlacementFaceRef}";
+                break;
+            }
         }
 
         // Unknown-outcome notice: when a previous execution of this exact tool
@@ -897,6 +1006,11 @@ public sealed class AssistantChatForm : Form
         _chatLog.Clear();
         while (_messagesPanel.Controls.Count > 0)
             _messagesPanel.Controls[0].Dispose();
+
+        // Phase 9.5: a new conversation discards the remembered "most recent
+        // created body" — the next auto-target resolution must re-establish
+        // the target from the live model, never from the previous session.
+        _controller.ResetTargetResolution();
 
         _chatLog.Add(ChatRole.Info, "已开始新对话，之前的消息不会发送给模型。");
         UpdateSessionStatus();

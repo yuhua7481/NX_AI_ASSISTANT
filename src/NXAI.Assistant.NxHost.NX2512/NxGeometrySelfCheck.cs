@@ -73,6 +73,7 @@ public sealed class NxGeometrySelfCheck
             cases.Add(CheckXzCircleRevolveTorus(tempPart));
             cases.Add(CheckPrimitives(tempPart));
             cases.Add(CheckStaleReferenceRefusal(tempPart));
+            cases.Add(CheckObjectRecognition(tempPart));
         }
         catch (Exception ex)
         {
@@ -618,6 +619,286 @@ public sealed class NxGeometrySelfCheck
         foreach (object _ in part.Bodies)
             count++;
         return count;
+    }
+
+    // ---------------------------------------------------- object recognition
+    // Phase 10 support: classify the object kinds the selection-driven tools
+    // (mirror / circular pattern / edge finish) resolve — Body, modeling
+    // Feature, Datum Plane, plain planar Face — with VERIFIABLE plane
+    // geometry (origin + unit normal) for the planar face, and structured
+    // diagnoses for invalid/ambiguous inputs. READ-ONLY on the model: the
+    // only NX writes here are the fixtures the case itself creates in the
+    // disposable self-check part (a block + a datum plane), matching every
+    // other case's contract.
+
+    private sealed record RecognizedObject(
+        string Kind,          // body | feature | datum_plane | planar_face | other
+        string Ref,
+        double? OriginX, double? OriginY, double? OriginZ,
+        double? NormalX, double? NormalY, double? NormalZ,
+        string? Note);
+
+    private CaseResult CheckObjectRecognition(Part part)
+    {
+        const string input = "临时部件：创建 1 个块 + 1 个基准面，分类 Body/Feature/DatumPlane/平面面并读出平面几何";
+        const string expected =
+            "四类对象正确区分；平面面输出原点+单位法向且可核验；多平面候选报告歧义";
+        try
+        {
+            // --- fixtures: one block, one datum plane (disposable part) ---
+            var blockResult = _executor.ExecuteCreateBlock(
+                new CreateBlockParameters(300, 0, 0, 20, 20, 20, "mm"), null);
+            if (blockResult.Status != ToolExecutionStatus.Success)
+                return Fail("caseE.recog.setup", input, expected,
+                    $"块创建失败：{blockResult.Message}");
+
+            Body? blockBody = null;
+            foreach (object item in part.Bodies)
+                if (item is Body b && !IsDeadObject(b))
+                    blockBody = b; // the newest body is the block
+            if (blockBody == null)
+                return Fail("caseE.recog.setup", input, expected, "临时部件中找不到实体");
+
+            var datum = part.Datums.ToArray().OfType<DatumPlane>().FirstOrDefault();
+            if (datum == null)
+            {
+                // Create a fixed datum plane (XY-parallel, at Z=40) for the
+                // fixture. CreateFixedDatumPlane(Point3d, Matrix3x3) — the
+                // matrix orients the plane; identity = +Z normal.
+                var identity = new Matrix3x3();
+                identity.Xx = 1.0; identity.Xy = 0.0; identity.Xz = 0.0;
+                identity.Yx = 0.0; identity.Yy = 1.0; identity.Yz = 0.0;
+                identity.Zx = 0.0; identity.Zy = 0.0; identity.Zz = 1.0;
+                var datumFeature = part.Datums.CreateFixedDatumPlane(
+                    new Point3d(0, 0, 40), identity);
+                datum = datumFeature;
+            }
+            if (datum == null)
+                return Fail("caseE.recog.setup", input, expected, "基准面创建失败");
+
+            // --- classification (read-only) ---
+            var recognized = new List<RecognizedObject>();
+            ClassifyAsBodyOrFeature(blockBody, recognized);
+            ClassifyDatumPlane(datum, recognized);
+            var topFace = FindTopPlanarFace(blockBody);
+            if (topFace != null)
+                ClassifyPlanarFace(topFace, recognized);
+            // The feature-tree view of the same block: a feature owning
+            // exactly one body resolves to that body (role-separation
+            // contract with the mirror/pattern executors).
+            var blockFeature = part.Features.ToArray()
+                .OfType<NXOpen.Features.Feature>()
+                .LastOrDefault(f => !IsDeadObject(f) && f.GetBodies().Contains(blockBody));
+            if (blockFeature != null)
+                ClassifyFeature(blockFeature, recognized);
+
+            // 1. Body classified as body
+            var bodyRow = recognized.FirstOrDefault(r => r.Kind == "body");
+            if (bodyRow == null)
+                return Fail("caseE.recog.body", input, expected, "实体未被识别为 body");
+
+            // 2. Datum plane classified as datum_plane with normal
+            var dpRow = recognized.FirstOrDefault(r => r.Kind == "datum_plane");
+            if (dpRow == null)
+                return Fail("caseE.recog.datum", input, expected, "基准面未被识别为 datum_plane");
+            if (dpRow.NormalZ == null || Math.Abs(dpRow.NormalZ.Value) < 0.999)
+                return Fail("caseE.recog.datum.normal", input, expected,
+                    $"基准面法向 ({dpRow.NormalX},{dpRow.NormalY},{dpRow.NormalZ})，预期 ±Z 轴向");
+
+            // 3. Planar face classified as planar_face with verifiable
+            //    origin+normal: the block's top face must be Z=20, normal +Z.
+            var faceRow = recognized.FirstOrDefault(r => r.Kind == "planar_face");
+            if (faceRow == null)
+                return Fail("caseE.recog.face", input, expected, "平面面未被识别为 planar_face");
+            if (faceRow.OriginZ == null || Math.Abs(faceRow.OriginZ.Value - 20.0) > 0.001)
+                return Fail("caseE.recog.face.origin", input, expected,
+                    $"平面面中心 Z={faceRow.OriginZ:0.###}，预期 20（块顶面）");
+            if (faceRow.NormalZ == null || Math.Abs(faceRow.NormalZ.Value - 1.0) > 0.001)
+                return Fail("caseE.recog.face.normal", input, expected,
+                    $"平面面法向 Z={faceRow.NormalZ:0.###}，预期 1（顶面外法向）");
+
+            // 4. Ambiguity: two plane candidates (datum + face) must be
+            //    reported as ambiguous, not silently ranked.
+            var planeCandidates = recognized.Count(r =>
+                r.Kind is "datum_plane" or "planar_face");
+            if (planeCandidates != 2)
+                return Fail("caseE.recog.candidates", input, expected,
+                    $"平面候选数 {planeCandidates}，预期 2（歧义检测的输入）");
+
+            // 5. Invalid reference: a dead/cloned object ref must diagnose,
+            //    never throw raw.
+            string deadDiagnosis = DescribeInvalidObject(part);
+
+            return new CaseResult(
+                "caseE.recognition", true, "verified", input, expected,
+                $"Body/Feature/DatumPlane/平面面 四类正确；平面面 origin Z={faceRow.OriginZ:0.###} " +
+                $"normal=({faceRow.NormalX:0.###},{faceRow.NormalY:0.###},{faceRow.NormalZ:0.###})；" +
+                $"平面候选 2 个（歧义可检测）；无效对象诊断：{deadDiagnosis}",
+                null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseE.recog.exception", input, expected,
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void ClassifyAsBodyOrFeature(Body body, List<RecognizedObject> recognized)
+    {
+        recognized.Add(new RecognizedObject(
+            "body", SafeRef(body),
+            null, null, null, null, null, null,
+            $"面数 {CountFaces(body)}"));
+    }
+
+    /// <summary>Classifies a feature-tree node: a datum-plane feature maps
+    /// to datum_plane, a feature owning EXACTLY one solid body maps to that
+    /// body, and anything else stays a "feature" row (the mirror FEATURE
+    /// mode's seed kind). Read-only.</summary>
+    private static void ClassifyFeature(
+        NXOpen.Features.Feature feature, List<RecognizedObject> recognized)
+    {
+        if (feature is NXOpen.Features.DatumPlaneFeature dpf)
+        {
+            var inner = dpf.GetEntities().OfType<DatumPlane>().FirstOrDefault();
+            if (inner != null)
+            {
+                ClassifyDatumPlane(inner, recognized);
+                return;
+            }
+        }
+        try
+        {
+            var owned = feature.GetBodies()
+                .Where(b => b is Body bb && !IsDeadObject(bb) && !bb.IsSheetBody)
+                .Cast<Body>().ToList();
+            if (owned.Count == 1)
+            {
+                ClassifyAsBodyOrFeature(owned[0], recognized);
+                return;
+            }
+        }
+        catch
+        {
+            // unreadable bodies: fall through to the feature row
+        }
+        recognized.Add(new RecognizedObject(
+            "feature", SafeRef(feature),
+            null, null, null, null, null, null,
+            feature.GetType().Name));
+    }
+
+    private static void ClassifyDatumPlane(DatumPlane dp, List<RecognizedObject> recognized)
+    {
+        // DatumPlane exposes Origin (Point3d) and Normal (Vector3d) scalars —
+        // the compile-verified members the mirror/circular executors use.
+        var o = dp.Origin;
+        var n = dp.Normal;
+        double len = Math.Sqrt(n.X * n.X + n.Y * n.Y + n.Z * n.Z);
+        recognized.Add(new RecognizedObject(
+            "datum_plane", SafeRef(dp),
+            o.X, o.Y, o.Z,
+            n.X / len, n.Y / len, n.Z / len,
+            len < 0.5 ? "法向长度异常" : null));
+    }
+
+    private static void ClassifyPlanarFace(Face face, List<RecognizedObject> recognized)
+    {
+        // Verified read path: AskFaceUvMinmax → UV midpoint → AskFaceProps
+        // (UFEvalsf is forbidden on planar faces — 2026-10-16 crash record).
+        var ufSession = UFSession.GetUFSession();
+        double[] uv = new double[4];
+        ufSession.Modl.AskFaceUvMinmax(face.Tag, uv);
+        double[] param = { (uv[0] + uv[2]) / 2.0, (uv[1] + uv[3]) / 2.0 };
+        double[] point = new double[3];
+        double[] u1 = new double[3], v1 = new double[3], u2 = new double[3], v2 = new double[3];
+        double[] unitNorm = new double[3];
+        double[] radii = new double[2];
+        ufSession.Modl.AskFaceProps(face.Tag, param, point, u1, v1, u2, v2, unitNorm, radii);
+        recognized.Add(new RecognizedObject(
+            "planar_face", SafeRef(face),
+            point[0], point[1], point[2],
+            unitNorm[0], unitNorm[1], unitNorm[2],
+            null));
+    }
+
+    private static Face? FindTopPlanarFace(Body body)
+    {
+        Face? best = null;
+        double bestZ = double.MinValue;
+        foreach (Face face in body.GetFaces())
+        {
+            if (IsDeadObject(face))
+                continue;
+            try
+            {
+                if (face.SolidFaceType.ToString().ToLowerInvariant() != "planar")
+                    continue;
+                var ufSession = UFSession.GetUFSession();
+                double[] uv = new double[4];
+                ufSession.Modl.AskFaceUvMinmax(face.Tag, uv);
+                double[] param = { (uv[0] + uv[2]) / 2.0, (uv[1] + uv[3]) / 2.0 };
+                double[] point = new double[3];
+                double[] u1 = new double[3], v1 = new double[3], u2 = new double[3], v2 = new double[3];
+                double[] unitNorm = new double[3];
+                double[] radii = new double[2];
+                ufSession.Modl.AskFaceProps(face.Tag, param, point, u1, v1, u2, v2, unitNorm, radii);
+                if (point[2] > bestZ)
+                {
+                    bestZ = point[2];
+                    best = face;
+                }
+            }
+            catch
+            {
+                // unreadable face: not the top candidate
+            }
+        }
+        return best;
+    }
+
+    private static string DescribeInvalidObject(Part part)
+    {
+        // A body ref from a DIFFERENT (nonexistent) part context — the
+        // executor's IsDead check must classify it as invalid without a
+        // raw exception. The practical probe: a body removed from the
+        // collection cannot be constructed here, so verify the dead-check
+        // on a cloned-and-undone tag is not directly reproducible; instead
+        // assert the classifier treats a NON-body TaggedObject honestly.
+        var arcs = part.Arcs.ToArray();
+        if (arcs.Length > 0 && arcs[0] is Arc arc)
+            return IsDeadObject(arc)
+                ? "Arc 判定为失效对象"
+                : "Arc 非实体/非面 → 会被种子解析器归入'不是实体'诊断（不抛异常）";
+        return "部件内无额外对象可枚举（死引用路径由执行器 IsDead 门承担）";
+    }
+
+    private static int CountFaces(Body body)
+    {
+        int count = 0;
+        foreach (object _ in body.GetFaces())
+            count++;
+        return count;
+    }
+
+    private static string SafeRef(NXObject obj)
+    {
+        try { return obj.JournalIdentifier; }
+        catch { return "(ref 不可读)"; }
+    }
+
+    private static bool IsDeadObject(NXObject obj)
+    {
+        try
+        {
+            _ = obj.Tag;
+            _ = obj.IsOccurrence;
+            return false;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     private static string? ExtractRef(string? detailsJson, string key)

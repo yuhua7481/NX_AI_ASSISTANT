@@ -45,4 +45,10 @@
     <ProjectReference Include="..\NXAI.Assistant.UI\NXAI.Assistant.UI.csproj" />
   </ItemGroup>
 
+  <!-- Offline tests exercise extracted internal verdict helpers (see
+       EdgeFinishPostconditionTests); same pattern as Core. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="NXAI.Assistant.Tests" />
+  </ItemGroup>
+
 </Project>

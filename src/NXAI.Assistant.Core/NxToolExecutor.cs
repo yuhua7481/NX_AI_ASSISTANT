@@ -133,6 +133,81 @@ public interface INxToolExecutor
         BooleanOperationParameters parameters, string? expectedWorkPartFullPath);
 
     /// <summary>
+    /// Creates a SIMPLE blind hole on the referenced planar face (Phase 9.1
+    /// minimum). The face reference must resolve to exactly one planar face
+    /// in the current work part; the hole axis runs along the face normal at
+    /// the requested UV offset from the face's parameter midpoint. Same
+    /// confirmation/precondition contract as the other geometry tools.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateHole(
+        CreateHoleParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a STANDARD hole (threaded / simple screw clearance /
+    /// counterbored / countersunk) of the requested family and size on the
+    /// referenced planar face. All diameters, angles, chamfers and (for the
+    /// counterbored/countersunk families) depths come from the installed NX
+    /// modeling-standards XML tables — the record must match UNIQUELY or the
+    /// execution is refused. Same confirmation/precondition contract as the
+    /// other geometry tools.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateStandardHole(
+        CreateStandardHoleParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a constant-radius edge blend (fillet) on the edges of the
+    /// CURRENT selection. The selection is re-resolved and re-verified at
+    /// execution time (after user confirmation); a stale or empty selection
+    /// refuses. Same confirmation/precondition contract as the other
+    /// geometry tools.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateFillet(
+        CreateFilletParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a symmetric chamfer (NX ChamferOption.SymmetricOffsets) on
+    /// the edges of the CURRENT selection. Same selection/confirmation
+    /// contract as the fillet.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateChamfer(
+        CreateChamferParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a 1-D LINEAR pattern of the auto-resolved target: feature
+    /// mode arrays the most recent verified FEATURE (PatternFeatureBuilder);
+    /// geometry mode arrays the most recent verified BODY
+    /// (PatternGeometryBuilder). Direction/count/pitch come from the
+    /// parameters; the target re-resolves live at execution time. Same
+    /// confirmation/precondition contract as the other geometry tools.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateLinearPattern(
+        CreateLinearPatternParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a native CIRCULAR pattern of the resolved target: feature
+    /// mode arrays a resolved FEATURE, geometry mode a resolved BODY —
+    /// same modes/semantics as the linear tool. The rotation axis comes
+    /// from the parameters' axis kind (absolute axis through the origin,
+    /// or the current selection's datum axis / straight edge, resolved and
+    /// verified host-side). Count = total instances including the seed;
+    /// full circle (no total angle) divides 360° evenly, partial arcs end
+    /// ON the requested end angle.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateCircularPattern(
+        CreateCircularPatternParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
+    /// Creates a native MIRROR of the resolved objects: geometry mode
+    /// mirrors one or more solid bodies (MirrorBodyBuilder, sources kept);
+    /// feature mode mirrors one or more modeling features
+    /// (MirrorFeatureBuilder, history preserved). The mirror plane is a
+    /// selected datum plane or a planar solid face, resolved and verified
+    /// host-side with roles separated from the seeds.
+    /// </summary>
+    CreateBlockExecutionResult ExecuteCreateMirror(
+        CreateMirrorParameters parameters, string? expectedWorkPartFullPath);
+
+    /// <summary>
     /// READ-ONLY probe: did a previous attempt of this modeling operation
     /// actually commit a feature in the current work part? Used by the
     /// autonomous mode's unknown-outcome recovery — the controller asks the
@@ -191,6 +266,26 @@ public interface INxToolExecutor
     /// never mutates. An EMPTY non-null set is a valid baseline.
     /// </summary>
     IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null);
+}
+
+/// <summary>
+/// Phase 9.5: optional hook an executor implements so the controller can
+/// hand it the session's most recent executor-verified body reference (e.g.
+/// "BLOCK(5)"). The edge-finish tools use it as an auto-target candidate
+/// when the user's selection is empty — the candidate is only a HINT: the
+/// executor must still re-resolve and re-verify the body in the live part
+/// (deleted/undone refs refuse). The provider returns the controller's
+/// CURRENT value (a delegate, not a copy) so a new conversation yields
+/// null immediately.
+/// </summary>
+public interface NxTargetResolutionSink
+{
+    Func<string?>? LastCreatedBodyRefProvider { get; set; }
+
+    /// <summary>The controller's most recent executor-verified FEATURE
+    /// reference (hole/blend/chamfer) for the linear-pattern FEATURE mode;
+    /// null until a feature-creating result succeeds this conversation.</summary>
+    Func<string?>? LastCreatedFeatureRefProvider { get; set; }
 }
 
 /// <summary>

@@ -23,7 +23,7 @@ public class ChatSessionControllerToolTests
     private const string ToolCallJson =
         """{"length":100,"width":60,"height":20,"unit":"mm"}""";
 
-    private sealed class ScriptedSender
+    internal sealed class ScriptedSender
     {
         public readonly List<IReadOnlyList<OutboundMessage>> Requests = new();
         public readonly List<IReadOnlyList<ToolDefinition>?> ToolDeclarations = new();
@@ -68,8 +68,79 @@ public class ChatSessionControllerToolTests
             ChatCompletionResult.OkToolCalls([new ParsedToolCall(id, name, args)]);
     }
 
-    private sealed class CountingExecutor : INxToolExecutor
+    internal sealed class CountingExecutor : INxToolExecutor
     {
+        public CreateBlockExecutionResult ExecuteCreateHole(
+            CreateHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateStandardHole(
+            CreateStandardHoleParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            Calls.Add(StandardHoleToolName(parameters));
+            LastToolName = StandardHoleToolName(parameters);
+            LastExpectedPath = expectedWorkPartFullPath;
+            LastStandardHoleParameters = parameters;
+            return Outcome(StandardHoleToolName(parameters));
+        }
+
+        private static string StandardHoleToolName(CreateStandardHoleParameters p) => p.Family switch
+        {
+            StandardHoleFamily.Threaded => StandardHoleToolContract.ThreadedName,
+            StandardHoleFamily.SimpleClearance => StandardHoleToolContract.ClearanceName,
+            StandardHoleFamily.Counterbored => StandardHoleToolContract.CounterboredName,
+            _ => StandardHoleToolContract.CountersunkName,
+        };
+
+        public CreateBlockExecutionResult ExecuteCreateFillet(
+            CreateFilletParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            Calls.Add(CreateFilletRequestParser.ToolName);
+            LastToolName = CreateFilletRequestParser.ToolName;
+            LastExpectedPath = expectedWorkPartFullPath;
+            return Outcome(CreateFilletRequestParser.ToolName);
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateChamfer(
+            CreateChamferParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            Calls.Add(CreateChamferRequestParser.ToolName);
+            LastToolName = CreateChamferRequestParser.ToolName;
+            LastExpectedPath = expectedWorkPartFullPath;
+            return Outcome(CreateChamferRequestParser.ToolName);
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateLinearPattern(
+            CreateLinearPatternParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            Calls.Add(LinearPatternToolContract.Name);
+            LastToolName = LinearPatternToolContract.Name;
+            LastExpectedPath = expectedWorkPartFullPath;
+            return Outcome(LinearPatternToolContract.Name);
+        }
+        public CreateBlockExecutionResult ExecuteCreateCircularPattern(
+            CreateCircularPatternParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            Calls.Add(CircularPatternToolContract.Name);
+            LastToolName = CircularPatternToolContract.Name;
+            LastExpectedPath = expectedWorkPartFullPath;
+            return Outcome(CircularPatternToolContract.Name);
+        }
+
+        public CreateBlockExecutionResult ExecuteCreateMirror(
+            CreateMirrorParameters parameters, string? expectedWorkPartFullPath)
+        {
+            CallCount++;
+            Calls.Add(MirrorToolContract.Name);
+            LastToolName = MirrorToolContract.Name;
+            LastExpectedPath = expectedWorkPartFullPath;
+            return Outcome(MirrorToolContract.Name);
+        }
+
         public int CallCount;
         public CreateBlockExecutionResult Result { get; set; } =
             CreateBlockExecutionResult.Success(100, 60, 20, "成功", "part.prt");
@@ -160,6 +231,7 @@ public class ChatSessionControllerToolTests
             => ProbeResultOverride.TryGetValue(toolName, out var result) ? result : null;
 
         public CreateConeParameters? LastConeParameters { get; private set; }
+        public CreateStandardHoleParameters? LastStandardHoleParameters { get; private set; }
         public ModelFeatureProbeResult? ProbeCommittedFeature(
             string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
             BooleanOperationType? operationType = null) =>
@@ -199,6 +271,27 @@ public class ChatSessionControllerToolTests
             CreateSphereParameters parameters, string? expectedWorkPartFullPath) =>
             throw new InProcessCrashException("模拟进程崩溃：执行器未返回");
 
+        public CreateBlockExecutionResult ExecuteCreateHole(
+            CreateHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateStandardHole(
+            CreateStandardHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateFillet(
+            CreateFilletParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateChamfer(
+            CreateChamferParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateLinearPattern(
+            CreateLinearPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateCircularPattern(
+            CreateCircularPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateMirror(
+            CreateMirrorParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
         public CreateBlockExecutionResult ExecuteCreateSketch(
             CreateSketchParameters parameters, string? expectedWorkPartFullPath) =>
             throw new InProcessCrashException("模拟进程崩溃：执行器未返回");
@@ -229,7 +322,7 @@ public class ChatSessionControllerToolTests
         }
     }
 
-    private sealed class ConfirmationGate
+    internal sealed class ConfirmationGate
     {
         private readonly Queue<TaskCompletionSource<ToolConfirmationDecision?>> _pending = new();
         public List<ToolConfirmationRequest> Requests { get; } = new();
@@ -576,7 +669,7 @@ public class ChatSessionControllerToolTests
 
         Assert.Equal(1, sender.RequestCount);
         Assert.Equal(0, executor.CallCount);
-        Assert.Equal(8, sender.ToolDeclarations[0]!.Count); // eight tools advertised
+        Assert.Equal(18, sender.ToolDeclarations[0]!.Count); // 13 tools advertised (9 geometry + 4 standard-hole)
         Assert.Equal(2, log.Messages.Count);
         Assert.Equal(ChatRole.Assistant, log.Messages[1].Role);
     }
@@ -829,6 +922,59 @@ public class ChatSessionControllerToolTests
         Assert.Equal(0, executor.CallCount);
     }
 
+    // -------------------------------------- Phase 9.5: remembered auto-target
+
+    [Fact]
+    public async Task Successful_block_records_LastCreatedBodyRef()
+    {
+        var (controller, sender, _, executor, gate) = Create();
+        executor.PerToolResults["create_block"] = CreateBlockExecutionResult.Success(
+            60, 60, 60, "成功", "part.prt",
+            System.Text.Json.JsonSerializer.Serialize(
+                new Dictionary<string, object?> { ["newBodyRef"] = "BLOCK(5)" }));
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_block",
+            args: """{"length":60,"width":60,"height":60,"unit":"mm"}"""));
+
+        controller.StartSend("创建60*60*60");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.CallCount);
+        Assert.Equal("BLOCK(5)", controller.LastCreatedBodyRef);
+    }
+
+    [Fact]
+    public async Task Failed_result_does_not_record_LastCreatedBodyRef()
+    {
+        var (controller, sender, _, executor, gate) = Create();
+        executor.PerToolResults["create_block"] = CreateBlockExecutionResult.Failure(
+            ToolExecutionStatus.VerificationFailed, "验证失败");
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_block",
+            args: """{"length":60,"width":60,"height":60,"unit":"mm"}"""));
+
+        controller.StartSend("创建60*60*60");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Null(controller.LastCreatedBodyRef);
+    }
+
+    [Fact]
+    public void ResetTargetResolution_clears_remembered_ref()
+    {
+        var (controller, _, _, _, _) = Create();
+        controller.ResetTargetResolution();
+        Assert.Null(controller.LastCreatedBodyRef);
+    }
+
+    [Fact]
+    public void NxExecutor_implements_target_sink_and_defaults_to_null_provider()
+    {
+        // The real executor exposes the sink; without a controller wiring
+        // the provider the auto-target candidate is null (fail-safe).
+        var executor = new NXAI.Assistant.NxHost.NX2512.NxToolExecutor();
+        Assert.Null(executor.LastCreatedBodyRefProvider);
+        Assert.Null(executor.LastCreatedBodyRefProvider?.Invoke());
+    }
+
     [Fact]
     public async Task Four_tools_all_registered_and_advertised()
     {
@@ -839,14 +985,126 @@ public class ChatSessionControllerToolTests
         await WaitForCompletedAsync(controller);
 
         var tools = sender.ToolDeclarations[0]!;
-        Assert.Equal(8, tools.Count);
+        Assert.Equal(18, tools.Count);
         Assert.Equal(
             new HashSet<string>
             {
                 "create_block", "create_cylinder", "create_cone", "create_sphere",
                 "create_sketch", "create_extrude", "create_revolve", "boolean_operation",
+                "create_hole",
+                "create_threaded_hole", "create_clearance_hole",
+                "create_counterbored_hole", "create_countersunk_hole",
+                "create_fillet", "create_chamfer",
+                "create_linear_pattern", "create_circular_pattern", "create_mirror",
             },
             tools.Select(t => t.Name).ToHashSet());
+    }
+
+    [Fact]
+    public async Task Standard_hole_four_families_route_to_executor_and_confirm()
+    {
+        var executor = new CountingExecutor();
+        var log = new ChatLog();
+        var sender = new ScriptedSender();
+        var gate = new ConfirmationGate();
+        var controller = new ChatSessionController(
+            new ModelService(), log, () => ("https://api.test/v1", "key", "model"),
+            sender.SendAsync, 20, executor, gate.Handler);
+
+        string[] names =
+        {
+            StandardHoleToolContract.ThreadedName,
+            StandardHoleToolContract.ClearanceName,
+            StandardHoleToolContract.CounterboredName,
+            StandardHoleToolContract.CountersunkName,
+        };
+        string[] args =
+        {
+            """{"size":"M12","placement_face_ref":"FACE 1","hole_depth":25,"thread_depth":18,"unit":"mm"}""",
+            """{"size":"M10","placement_face_ref":"FACE 1","unit":"mm"}""",
+            """{"size":"M8","placement_face_ref":"FACE 1","unit":"mm"}""",
+            """{"size":"M6","placement_face_ref":"FACE 1","unit":"mm"}""",
+        };
+        for (int i = 0; i < 4; i++)
+        {
+            gate.EnqueuePending(out var pending);
+            sender.Enqueue(ScriptedSender.ToolCall(id: $"call_{i}", name: names[i], args: args[i]));
+
+            controller.StartSend("打孔");
+            await UntilAsync(() => gate.Requests.Count > 0);
+            Assert.Equal(ToolParametersKind.StandardHole, gate.Requests[^1].ParametersKind);
+            var std = gate.Requests[^1].StandardHoleParameters!;
+            Assert.Equal(names[i] == StandardHoleToolContract.ThreadedName ? StandardHoleFamily.Threaded
+                : names[i] == StandardHoleToolContract.ClearanceName ? StandardHoleFamily.SimpleClearance
+                : names[i] == StandardHoleToolContract.CounterboredName ? StandardHoleFamily.Counterbored
+                : StandardHoleFamily.Countersunk, std.Family);
+            pending.TrySetResult(new ToolConfirmationDecision(true, "D:\\part.prt"));
+            await WaitForCompletedAsync(controller);
+
+            // Reset per-round state: a fresh tool call arrives each loop and
+            // the controller's own round bookkeeping is per-turn.
+            sender.Requests.Clear();
+            gate.Requests.Clear();
+        }
+
+        Assert.Equal(4, executor.CallCount);
+        Assert.Equal(4, executor.Calls.Count(name => names.Contains(name)));
+    }
+
+    [Fact]
+    public async Task Standard_hole_unsupported_size_M16_rejected_before_confirmation()
+    {
+        // M16 is outside the parser's nine-size list — refused at parse time,
+        // no confirmation card, no executor call.
+        var (controller, sender, _, executor, gate) = Create();
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_threaded_hole",
+            args: """{"size":"M16","placement_face_ref":"FACE 1","unit":"mm"}"""));
+
+        controller.StartSend("创建 M16 螺纹孔");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.CallCount);
+        Assert.Empty(gate.Requests);
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("invalid_parameters", payload.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Standard_hole_countersunk_M2_passes_parser_executor_refuses_at_table()
+    {
+        // M2 IS a supported size token — it reaches the executor, which
+        // resolves against the standard table and refuses (the ISO 10642
+        // countersunk series has no M2 record). The fake executor here
+        // reports success for any table content; the table-level refusal is
+        // covered by StandardHoleTableTests + the real NxHost executor's
+        // own path. What this test pins: M2 does NOT get blocked before the
+        // executor, and the structured result round-trips.
+        var (controller, sender, _, executor, gate) = Create();
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_countersunk_hole",
+            args: """{"size":"M2","placement_face_ref":"FACE 1","unit":"mm"}"""));
+
+        controller.StartSend("创建 M2 沉头孔");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(1, executor.CallCount);
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("success", payload.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Standard_hole_depth_rule_thread_ge_hole_rejected()
+    {
+        var (controller, sender, _, executor, gate) = Create();
+        sender.Enqueue(ScriptedSender.ToolCall(name: "create_threaded_hole",
+            args: """{"size":"M6","placement_face_ref":"FACE 1","hole_depth":10,"thread_depth":10,"unit":"mm"}"""));
+
+        controller.StartSend("创建螺纹孔");
+        await WaitForCompletedAsync(controller);
+
+        Assert.Equal(0, executor.CallCount);
+        Assert.Empty(gate.Requests);
+        var payload = ParsePayload(sender.Requests[1], 2);
+        Assert.Equal("invalid_parameters", payload.GetProperty("status").GetString());
     }
 
     // -------------------------------------- turn-state consistency receipts
@@ -1417,6 +1675,28 @@ public class ChatSessionControllerToolTests
     /// </summary>
     private sealed class UncertainExecutor : INxToolExecutor
     {
+        public CreateBlockExecutionResult ExecuteCreateHole(
+            CreateHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateStandardHole(
+            CreateStandardHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateFillet(
+            CreateFilletParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateChamfer(
+            CreateChamferParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateLinearPattern(
+            CreateLinearPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateCircularPattern(
+            CreateCircularPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateMirror(
+            CreateMirrorParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+
         public CreateBlockExecutionResult ExecuteCreateBlock(
             CreateBlockParameters parameters, string? expectedWorkPartFullPath) =>
             CreateBlockExecutionResult.Failure(
@@ -1719,5 +1999,30 @@ public class ChatSessionControllerToolTests
         // The visible chat also names the refusal rather than hiding it.
         Assert.Contains(log.Messages, m => m.Text.Contains("上限") && m.Text.Contains("未执行"));
         _ = gate;
+    }
+}
+
+/// <summary>Public entry for cross-test-class routing tests (EdgeFinishToolContractTests).</summary>
+public static class ChatSessionControllerToolTestsPublicHelpers
+{
+    public static Task WaitForCompletedAsyncPublic(ChatSessionController controller)
+    {
+        // Reuse the private implementation through reflection-free rebind:
+        // the same WhenAny+Delay pattern (see ChatSessionControllerToolTests
+        // remarks for why the raw TCS await must not be used).
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        controller.RequestCompleted += (_, _) => tcs.TrySetResult();
+        return Task.WhenAny(tcs.Task, Task.Delay(10_000));
+    }
+
+    public static async Task UntilAsyncPublic(Func<bool> condition)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        while (!condition())
+        {
+            if (stopwatch.Elapsed > TimeSpan.FromSeconds(10))
+                throw new TimeoutException("condition not met within 10s");
+            await Task.Delay(50);
+        }
     }
 }

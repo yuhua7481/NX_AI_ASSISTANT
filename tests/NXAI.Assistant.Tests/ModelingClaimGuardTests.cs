@@ -205,6 +205,28 @@ public class ModelingClaimGuardTests
 
     private sealed class ScriptableExecutor : INxToolExecutor
     {
+        public CreateBlockExecutionResult ExecuteCreateHole(
+            CreateHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateStandardHole(
+            CreateStandardHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateFillet(
+            CreateFilletParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateChamfer(
+            CreateChamferParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateLinearPattern(
+            CreateLinearPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateCircularPattern(
+            CreateCircularPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateMirror(
+            CreateMirrorParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+
         public ToolExecutionStatus BooleanStatus { get; set; } = ToolExecutionStatus.Success;
 
         private static CreateBlockExecutionResult Ok() =>

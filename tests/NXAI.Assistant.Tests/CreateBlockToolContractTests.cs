@@ -20,7 +20,7 @@ public class CreateBlockToolContractTests
     {
         var registry = CreateBlockTool.CreateRegistry();
         var tools = registry.All;
-        Assert.Equal(8, tools.Count);
+        Assert.Equal(18, tools.Count);
         Assert.True(registry.IsRegistered("create_block"));
         Assert.True(registry.IsRegistered("create_cylinder"));
         Assert.True(registry.IsRegistered("create_cone"));

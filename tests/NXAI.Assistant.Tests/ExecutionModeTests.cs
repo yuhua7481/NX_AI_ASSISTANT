@@ -145,7 +145,7 @@ public class ExecutionModeTests : IDisposable
     [Fact]
     public void Allowlist_ContainsExactlyTheEightRegisteredModelingTools()
     {
-        Assert.Equal(8, AutonomousToolAllowlist.Tools.Count);
+        Assert.Equal(18, AutonomousToolAllowlist.Tools.Count);
         Assert.Contains(CreateBlockTool.Name, AutonomousToolAllowlist.Tools);
         Assert.Contains(CreateCylinderTool.Name, AutonomousToolAllowlist.Tools);
         Assert.Contains(CreateConeTool.Name, AutonomousToolAllowlist.Tools);
@@ -154,6 +154,13 @@ public class ExecutionModeTests : IDisposable
         Assert.Contains(CreateExtrudeTool.Name, AutonomousToolAllowlist.Tools);
         Assert.Contains(CreateRevolveTool.Name, AutonomousToolAllowlist.Tools);
         Assert.Contains(BooleanOperationTool.Name, AutonomousToolAllowlist.Tools);
+        Assert.Contains(StandardHoleToolContract.ThreadedName, AutonomousToolAllowlist.Tools);
+        Assert.Contains(StandardHoleToolContract.ClearanceName, AutonomousToolAllowlist.Tools);
+        Assert.Contains(StandardHoleToolContract.CounterboredName, AutonomousToolAllowlist.Tools);
+        Assert.Contains(StandardHoleToolContract.CountersunkName, AutonomousToolAllowlist.Tools);
+        Assert.Contains(EdgeFinishToolContract.FilletName, AutonomousToolAllowlist.Tools);
+        Assert.Contains(EdgeFinishToolContract.ChamferName, AutonomousToolAllowlist.Tools);
+        Assert.Contains(LinearPatternToolContract.Name, AutonomousToolAllowlist.Tools);
     }
 
     [Theory]

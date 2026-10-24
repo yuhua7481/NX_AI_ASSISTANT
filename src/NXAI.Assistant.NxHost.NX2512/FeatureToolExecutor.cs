@@ -2050,8 +2050,30 @@ public sealed partial class NxToolExecutor
             return failure!;
         }
 
-        Body? target = FindBodyByRef(workPart, parameters.TargetBodyRef, role: "target");
-        Body? tool = FindBodyByRef(workPart, parameters.ToolBodyRef, role: "tool");
+        // Phase 8.8: the ENTIRE precondition block runs BEFORE the main
+        // try/catch — an NX exception here (FindBodyByRef iteration,
+        // IsSheetBody read, box read) used to bubble out with NO
+        // execute.boolean stage log and NO LogFailure record. It is now
+        // wrapped: the failure is diagnosed, logged to BOTH logs, and
+        // returned as a structured refusal. Business logic is unchanged —
+        // the same checks run in the same order.
+        Body? target;
+        Body? tool;
+        try
+        {
+            target = FindBodyByRef(workPart, parameters.TargetBodyRef, role: "target");
+            tool = FindBodyByRef(workPart, parameters.ToolBodyRef, role: "tool");
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("execute.boolean",
+                $"ABORTED in body-ref resolution: {ex.GetType().Name}: {ex.Message}");
+            LogFailure(ex, workPartIdentity, $"Boolean{opName0}");
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.ExecutionFailed,
+                $"布尔运算前置检查发生异常（{ex.GetType().Name}：{ex.Message}），未执行任何建模操作。",
+                rolledBack: false, workPartIdentity: workPartIdentity);
+        }
         if (target == null)
         {
             PhaseLog.Write("execute.boolean",
@@ -2099,10 +2121,27 @@ public sealed partial class NxToolExecutor
                 workPartIdentity: workPartIdentity);
         }
 
-        int bodiesBefore = CountBodies(workPart);
-        HashSet<string> idsBefore = CollectBodyIds(workPart);
-        double[] targetBox = ReadBodyBox(target);
-        double[] toolBox = ReadBodyBox(tool);
+        int bodiesBefore;
+        HashSet<string> idsBefore;
+        double[] targetBox;
+        double[] toolBox;
+        try
+        {
+            bodiesBefore = CountBodies(workPart);
+            idsBefore = CollectBodyIds(workPart);
+            targetBox = ReadBodyBox(target);
+            toolBox = ReadBodyBox(tool);
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("execute.boolean",
+                $"ABORTED in pre-state snapshot: {ex.GetType().Name}: {ex.Message}");
+            LogFailure(ex, workPartIdentity, $"Boolean{opName0}");
+            return CreateBlockExecutionResult.Failure(
+                ToolExecutionStatus.ExecutionFailed,
+                $"布尔运算前置快照发生异常（{ex.GetType().Name}：{ex.Message}），未执行任何建模操作。",
+                rolledBack: false, workPartIdentity: workPartIdentity);
+        }
         PhaseLog.Write("execute.boolean",
             $"preconditions ok: op={opName0} target={target.JournalIdentifier} tool={tool.JournalIdentifier} bodiesBefore={bodiesBefore}");
 
@@ -2113,12 +2152,18 @@ public sealed partial class NxToolExecutor
             _ => "交集",
         };
 
-        Session.UndoMarkId markId = session.SetUndoMark(
-            Session.MarkVisibility.Visible, $"NXAI 布尔{opName}");
-
         BooleanBuilder? booleanBuilder = null;
+        Session.UndoMarkId markId = default;
+        bool markCreated = false;
         try
         {
+            // Undo mark creation is inside the guarded block so its failure
+            // is diagnosed and logged like every other stage.
+            markId = session.SetUndoMark(
+                Session.MarkVisibility.Visible, $"NXAI 布尔{opName}");
+            markCreated = true;
+            PhaseLog.Write("execute.boolean", $"undo mark created: NXAI 布尔{opName}");
+
             booleanBuilder = workPart.Features.CreateBooleanBuilder(null!);
             booleanBuilder.Operation = parameters.Operation switch
             {
@@ -2138,9 +2183,11 @@ public sealed partial class NxToolExecutor
                 $"builder configured: operation={booleanBuilder.Operation} targets=1 tools=1");
 
             var committedFeature = booleanBuilder.CommitFeature() as Feature;
+            PhaseLog.Write("execute.boolean",
+                $"commit returned: feature={(committedFeature != null ? SafeFeatureObjectId(committedFeature) : "null")} type={(committedFeature?.FeatureType ?? "?")} — running DoUpdate");
             session.UpdateManager.DoUpdate(markId);
             PhaseLog.Write("execute.boolean",
-                $"commit done: {opName} feature={SafeFeatureObjectId(committedFeature)} type={(committedFeature?.FeatureType ?? "?")}");
+                $"commit done: {opName} feature={(committedFeature != null ? SafeFeatureObjectId(committedFeature) : "null")} type={(committedFeature?.FeatureType ?? "?")} update=ok");
 
             // Stage C: the committed feature and its actual output bodies
             // are the primary evidence for result attribution (requirement 2
@@ -2336,8 +2383,30 @@ public sealed partial class NxToolExecutor
         }
         catch (Exception ex)
         {
-            (bool undone, string undoError) = Rollback(session, markId, $"NXAI 布尔{opName}");
-            LogFailure(ex, workPartIdentity, $"Boolean{opName}");
+            // Stage-tagged diagnostics: the log line names WHERE the attempt
+            // died (builder create/configure, Commit, DoUpdate, verification
+            // reads, or rollback itself), the error log carries the stack.
+            PhaseLog.Write("execute.boolean",
+                $"EXCEPTION: {ex.GetType().Name}: {ex.Message} (markCreated={markCreated})");
+            (bool undone, string undoError) = markCreated
+                ? Rollback(session, markId, $"NXAI 布尔{opName}")
+                : (false, "撤销标记尚未创建，无需回滚");
+            if (markCreated)
+                LogFailure(ex, workPartIdentity, $"Boolean{opName}");
+            else
+                LogFailure(ex, workPartIdentity, $"Boolean{opName0}-premark");
+            // Post-rollback state snapshot: proves the part actually
+            // recovered (body count back to the pre-attempt value).
+            try
+            {
+                if (markCreated)
+                    PhaseLog.Write("execute.boolean",
+                        $"post-rollback state: bodies={CountBodies(workPart)} (before={bodiesBefore})");
+            }
+            catch
+            {
+                // state read failure must not mask the original error
+            }
             return CreateBlockExecutionResult.Failure(
                 ToolExecutionStatus.ExecutionFailed,
                 $"{ex.GetType().Name}: {ex.Message}" +
@@ -2346,7 +2415,20 @@ public sealed partial class NxToolExecutor
         }
         finally
         {
-            booleanBuilder?.Destroy();
+            if (booleanBuilder != null)
+            {
+                try
+                {
+                    booleanBuilder.Destroy();
+                    PhaseLog.Write("execute.boolean", "builder destroyed");
+                }
+                catch (Exception destroyEx)
+                {
+                    // Destroy failure must not mask the original outcome.
+                    PhaseLog.Write("execute.boolean",
+                        $"builder destroy FAILED: {destroyEx.GetType().Name}: {destroyEx.Message}");
+                }
+            }
         }
     }
 
@@ -2591,6 +2673,7 @@ public sealed partial class NxToolExecutor
             ("create_sketch", _) => new[] { "SKETCH" },
             ("create_extrude", _) => new[] { "EXTRUDE" },
             ("create_revolve", _) => new[] { "REVOLVED" },
+            ("create_hole", _) => new[] { "HOLE" },
             ("boolean_operation", BooleanOperationType.Unite) => new[] { "UNITE" },
             ("boolean_operation", BooleanOperationType.Subtract) => new[] { "SUBTRACT" },
             ("boolean_operation", BooleanOperationType.Intersect) => new[] { "INTERSECT" },

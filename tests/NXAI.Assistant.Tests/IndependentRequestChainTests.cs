@@ -65,6 +65,27 @@ public class IndependentRequestChainTests
             CreateConeParameters p, string? path) => Record("create_cone", path);
         public CreateBlockExecutionResult ExecuteCreateSphere(
             CreateSphereParameters p, string? path) => Record("create_sphere", path);
+        public CreateBlockExecutionResult ExecuteCreateHole(
+            CreateHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateStandardHole(
+            CreateStandardHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateFillet(
+            CreateFilletParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateChamfer(
+            CreateChamferParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateLinearPattern(
+            CreateLinearPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateCircularPattern(
+            CreateCircularPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateMirror(
+            CreateMirrorParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
         public CreateBlockExecutionResult ExecuteCreateRevolve(
             CreateRevolveParameters p, string? path) => Record("create_revolve", path);
         public CreateBlockExecutionResult ExecuteBooleanOperation(

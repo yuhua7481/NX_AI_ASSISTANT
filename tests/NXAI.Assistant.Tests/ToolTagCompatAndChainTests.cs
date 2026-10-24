@@ -146,6 +146,27 @@ public class ToolTagCompatAndChainTests
         public CreateBlockExecutionResult ExecuteCreateSphere(
             CreateSphereParameters p, string? path) => Record("create_sphere", path);
 
+        public CreateBlockExecutionResult ExecuteCreateHole(
+            CreateHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateStandardHole(
+            CreateStandardHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateFillet(
+            CreateFilletParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateChamfer(
+            CreateChamferParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateLinearPattern(
+            CreateLinearPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateCircularPattern(
+            CreateCircularPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateMirror(
+            CreateMirrorParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
         public CreateBlockExecutionResult ExecuteCreateSketch(
             CreateSketchParameters p, string? path)
         {

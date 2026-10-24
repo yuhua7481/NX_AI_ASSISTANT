@@ -29,6 +29,11 @@ public sealed class ToolConfirmationRequest
     public CreateExtrudeParameters? ExtrudeParameters { get; private init; }
     public CreateRevolveParameters? RevolveParameters { get; private init; }
     public BooleanOperationParameters? BooleanParameters { get; private init; }
+    public CreateHoleParameters? HoleParameters { get; private init; }
+    public CreateStandardHoleParameters? StandardHoleParameters { get; private init; }
+    public CreateChamferParameters? ChamferParameters { get; private init; }
+    public CreateFilletParameters? FilletParameters { get; private init; }
+    public CreateLinearPatternParameters? LinearPatternParameters { get; private init; }
 
     public static ToolConfirmationRequest ForBlock(
         string toolCallId, string toolName, CreateBlockParameters parameters) => new()
@@ -102,6 +107,66 @@ public sealed class ToolConfirmationRequest
         BooleanParameters = parameters,
     };
 
+    public static ToolConfirmationRequest ForHole(
+        string toolCallId, string toolName, CreateHoleParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.Hole,
+        HoleParameters = parameters,
+    };
+
+    public static ToolConfirmationRequest ForStandardHole(
+        string toolCallId, string toolName, CreateStandardHoleParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.StandardHole,
+        StandardHoleParameters = parameters,
+    };
+
+    public static ToolConfirmationRequest ForEdgeFinish(
+        string toolCallId, string toolName,
+        CreateChamferParameters? chamfer, CreateFilletParameters? fillet) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = chamfer != null ? ToolParametersKind.Chamfer : ToolParametersKind.Fillet,
+        ChamferParameters = chamfer,
+        FilletParameters = fillet,
+    };
+
+    public static ToolConfirmationRequest ForLinearPattern(
+        string toolCallId, string toolName, CreateLinearPatternParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.LinearPattern,
+        LinearPatternParameters = parameters,
+    };
+
+    public CreateCircularPatternParameters? CircularPatternParameters { get; private init; }
+
+    public CreateMirrorParameters? MirrorParameters { get; private init; }
+
+    public static ToolConfirmationRequest ForMirror(
+        string toolCallId, string toolName, CreateMirrorParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.Mirror,
+        MirrorParameters = parameters,
+    };
+
+    public static ToolConfirmationRequest ForCircularPattern(
+        string toolCallId, string toolName, CreateCircularPatternParameters parameters) => new()
+    {
+        ToolCallId = toolCallId,
+        ToolName = toolName,
+        ParametersKind = ToolParametersKind.CircularPattern,
+        CircularPatternParameters = parameters,
+    };
+
     /// <summary>Resolved by the window: the user's decision, or null when the
     /// flow was aborted (window closing, request cancelled) — never executes.</summary>
     public Task<ToolConfirmationDecision?> Response => _tcs.Task;
@@ -123,4 +188,11 @@ public enum ToolParametersKind
     Extrude,
     Revolve,
     Boolean,
+    Hole,
+    StandardHole,
+    Fillet,
+    Chamfer,
+    LinearPattern,
+    CircularPattern,
+    Mirror,
 }

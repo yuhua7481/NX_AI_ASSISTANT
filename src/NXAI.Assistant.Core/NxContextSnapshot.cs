@@ -36,9 +36,28 @@ public sealed record NxContextSnapshot
     /// <summary>Selected objects; empty list when the selection is empty.</summary>
     public IReadOnlyList<NxSelectionItem> Selection { get; init; } = Array.Empty<NxSelectionItem>();
 
+    /// <summary>
+    /// Phase 9.7: the current work part's feature tree inventory, without
+    /// any selection needed — live, alive, non-suppressed features in tree
+    /// order with their stable references and display names. This is the
+    /// re-identification path after a fresh chat: the model can name an
+    /// existing target from THIS data, never from chat history.
+    /// </summary>
+    public IReadOnlyList<NxFeatureTreeItem> FeatureTree { get; init; } =
+        Array.Empty<NxFeatureTreeItem>();
+
     /// <summary>Fields that could not be read, with the reason.</summary>
     public IReadOnlyList<string> Unavailable { get; init; } = Array.Empty<string>();
 }
+
+/// <summary>One feature-tree row: kind, stable reference, display name.
+/// OutputBodyRef carries the single verified output body when exactly one
+/// exists (same policy as NxFeatureInfo) — hooks/tools key on Ref, not
+/// names.</summary>
+public sealed record NxFeatureTreeItem(
+    string Ref,
+    string RefType,
+    string? Name);
 
 /// <summary>A coordinate system summary (origin + axis directions).</summary>
 public sealed record NxCoordinateSystemInfo(
@@ -159,6 +178,15 @@ public static class NxContextSnapshotExtensions
         }
         if (snapshot.Selection.Count > 5)
             lines.Add($"（其余 {snapshot.Selection.Count - 5} 个选中对象未展开）");
+
+        if (snapshot.FeatureTree.Count > 0)
+        {
+            lines.Add($"部件特征树：共 {snapshot.FeatureTree.Count} 个特征（引用与名称如下，指令与后续工具可直接使用这些引用）。");
+            foreach (var row in snapshot.FeatureTree.Take(10))
+                lines.Add($"- [{row.RefType}] {row.Ref}" + (row.Name != null ? $"（{row.Name}）" : ""));
+            if (snapshot.FeatureTree.Count > 10)
+                lines.Add($"（其余 {snapshot.FeatureTree.Count - 10} 个特征未展开）");
+        }
 
         foreach (var reason in snapshot.Unavailable.Take(3))
             lines.Add($"未获取：{reason}");

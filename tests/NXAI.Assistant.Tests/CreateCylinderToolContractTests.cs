@@ -19,7 +19,7 @@ public class CreateCylinderToolContractTests
     public void Registry_ContainsBothTools()
     {
         var registry = CreateBlockTool.CreateRegistry();
-        Assert.Equal(8, registry.All.Count);
+        Assert.Equal(18, registry.All.Count);
         Assert.True(registry.IsRegistered("create_block"));
         Assert.True(registry.IsRegistered("create_cylinder"));
         Assert.True(registry.IsRegistered("create_cone"));

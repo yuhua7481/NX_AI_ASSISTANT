@@ -32,7 +32,7 @@ namespace NXAI.Assistant.Core;
 /// Parsing failure returns a reason so the caller can show a concise
 /// compatibility notice instead of rendering raw control markers.
 /// </summary>
-internal static partial class ToolTagProtocol
+public static partial class ToolTagProtocol
 {
     /// <summary>
     /// The model-specific markers, assembled from fragments so that no
@@ -74,9 +74,75 @@ internal static partial class ToolTagProtocol
     public sealed record ScanResult(
         string? CleanText, TagToolCall? ToolCall, string? ProtocolError);
 
-    /// <summary>True when the content contains any tool-tag marker at all.</summary>
+    /// <summary>True when the content contains any tool-tag marker at all —
+    /// an invoke block OR a stray parameter tag (2026-10-23 T1 leak: a
+    /// truncated call emits parameter tags without the invoke wrapper, and
+    /// they passed the invoke-only check straight into the chat).</summary>
     public static bool ContainsToolMarker(string content) =>
-        content.Contains(Markers.InvokeOpen, StringComparison.Ordinal);
+        content.Contains(Markers.InvokeOpen, StringComparison.Ordinal) ||
+        content.Contains(Markers.ParamOpen, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Display-side scrubber for content that failed Scan (unclosed block,
+    /// multiple blocks, junk in the parameter area): removes every
+    /// invoke-open ... invoke-close span and any stray
+    /// opening tag with everything after it, so raw protocol grammar never
+    /// renders in the chat. Pure text operation — no parsing, no execution.
+    /// </summary>
+    public static string StripInvokeMarkup(string content)
+    {
+        int open = content.IndexOf(Markers.InvokeOpen, StringComparison.Ordinal);
+        int param = content.IndexOf(Markers.ParamOpen, StringComparison.Ordinal);
+
+        // A stray parameter tag (no invoke wrapper around it) is markup
+        // residue too — cut from it to the next markup boundary.
+        if (open < 0 && param >= 0)
+        {
+            string head = content[..param].TrimEnd();
+            // Remove every parameter tag span in the remainder.
+            int cursor = param;
+            var cleaned = new System.Text.StringBuilder();
+            while (cursor < content.Length)
+            {
+                int p = content.IndexOf(Markers.ParamOpen, cursor, StringComparison.Ordinal);
+                if (p < 0)
+                {
+                    cleaned.Append(content[cursor..]);
+                    break;
+                }
+                cleaned.Append(content[cursor..p]);
+                int tagEnd = content.IndexOf('>', p);
+                if (tagEnd < 0)
+                    break; // unterminated tag: nothing trustworthy after it
+                int closeP = content.IndexOf(
+                    "</" + "an" + "tml:" + "par" + "ameter" + ">", tagEnd, StringComparison.Ordinal);
+                if (closeP < 0)
+                    break; // no closing tag: drop the rest
+                cursor = closeP + Markers.ParamClose.Length;
+            }
+            string combined = (head + " " + cleaned).Trim();
+            return combined;
+        }
+
+        if (open < 0)
+            return content;
+
+        int close = content.IndexOf(Markers.InvokeClose, open, StringComparison.Ordinal);
+        if (close < 0)
+        {
+            // Stray opener: the markup and everything after it is not
+            // trustworthy prose (it may be half a parameter payload).
+            string before = content[..open].TrimEnd();
+            return before.Length > 0 ? before : "";
+        }
+
+        string head2 = content[..open];
+        string tail = content[(close + Markers.InvokeClose.Length)..];
+        // Recurse: a second block (or a second stray opener) in the tail.
+        string scrubbedTail = StripInvokeMarkup(tail);
+        string combined2 = (head2.TrimEnd() + " " + scrubbedTail.TrimStart()).Trim();
+        return combined2;
+    }
 
     /// <summary>
     /// Normalizes one raw call for plan construction: canonical tool name
