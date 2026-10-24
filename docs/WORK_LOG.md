@@ -754,3 +754,62 @@
 - **测试**：新增 `GeometrySelfCheckRecognitionTests` 7 项（用例注册、四类识别、平面几何断言、歧义候选、只读契约、验证读取路径对、报告 DTO）；修正两处断言（feature 行由 ClassifyFeature 实现后通过；UFEvalsf 禁令改为禁 API 调用而非注释提及）。全量 **988 项 = 987 通过 / 0 失败 / 1 跳过**。Release 构建通过。
 - **部署**（NX 关闭，ugraf=0；未跑完整脚本，未触碰 nxai_assistant.men）：定向复制 4 DLL 并逐一核对——Core `b177da85…`、UI `fd7905a8…`、NxHost `c476f501…`（自检扩充+镜像载体）、Entry `e57b425b…`；菜单 `319ee927…` 未变。
 - **镜像实机验收状态**：G1–G4/F1–F4/N1–N2 **全部未执行**（自检按钮的实时识别用例亦需 NX 内人工触发）。清单见 WORK_LOG Phase 10 条目；自检新用例结果将出现在自检报告中（caseE.recognition）。
+
+## 2026-10-24 · Phase 10.2：几何自检全覆盖（18 工具 13 用例；离线验证通过；已部署；NX2512 实机自检待执行）
+
+- **覆盖矩阵**（现有 5 用例 → 13 用例，注册表 18 工具全部经真实 Executor 调用，无 Mock 成功）：
+  - 既有：caseA/B 草图+拉伸/旋转圆环、caseC 四基本体、caseD 失效引用拒绝、caseE.recognition 对象识别。
+  - 新增：**caseF.cone**（圆锥+圆台双变体）；**caseG.booleans**（Unite/Subtract/Intersect 各自独立夹具对，实体数变化分别断言：并 −1/减 −1/交 −1）；**caseH.hole**（简单孔顶面 φ10×12）；**caseH.std_holes**（四标准孔族 M6 各独立夹具块，标准匹配由执行器 XML 表验证）；**caseI.edge_finishes**（R2/C2 各独立块 12 棱边，**真实 NX 选区**驱动，断言特征类型含 BLEND/CHAMFER）；**caseJ.linear_pattern**（geometry +X×4 实体+3 / feature +X×3 实体数不变）；**caseK.circular_pattern**（geometry +Z 6 实例实体+5 / feature 4 实例不变）；**caseL.mirror**（双体+基准面 / 单体+平面面 / 特征+基准面，实体数与特征类型断言）；**caseM.negative**（空选区镜像、双镜像面歧义、无效引用拉伸全拒且零几何）。
+- **关键技术事实（编译/反射验证）**：NXOpenUI SelectionManager 全局选区驱动成员为 **`RequestSelections(TaggedObject[])` / `ClearGlobalSelectionList()`**（自建 tools/SelectionProbe 反射探针枚举全部成员后确定；SetSelection/SelectTaggedObjects 各参数数猜测均被编译否决）。
+- **报告首页字段**（GeometrySelfCheckReport 扩展，带默认值向后兼容）：RegisteredToolCount(=18)/CoveredToolCount（按用例组计数：基本体 4+孔 5+边缘 2+阵列 2+镜像 1+布尔 1）/NegativePassed-Failed（caseD+caseM）/CleanupResult（cleanup/restore 失败即列名上报）。
+- **测试**：新增 `GeometrySelfCheckCoverageTests` 9 项（13 用例调度、注册表 18 工具数对齐、15 个 Executor 全被调用+三布尔+双模式枚举、负向三场景、真实选区驱动、隔离恢复四要素、报告五字段、覆盖计数分组）。全量 **997 项 = 996 通过 / 0 失败 / 1 跳过**。Release 构建通过。
+- **部署**（NX 关闭 ugraf=0；定向复制，未跑完整脚本）：4 DLL 哈希核对 MATCH——Core `78c426ea…`、UI `6ba70210…`、NxHost `481b8686…`、Entry `6ab1e578…`；菜单 `319ee927…` 未变。
+- **NX2512 实机自检：未执行**（不虚报）。待执行：启动 NX → 自检按钮 → 核查 13 用例逐项结果与首页覆盖数/负向计数/清理结果；失败项按日志（`selfcheck.*`/`execute.*`）定位修复后重跑受影响场景与全量回归。
+
+## 2026-10-24 · Phase 10.3：实机自检失败修复（9/5 → 待复验；离线验证通过；已部署）
+
+- **完整日志定位第五失败项**（phase.log 1891–1899 行）：caseL.mirror 三场景全败——G2 场景只选了基准面没选两个种子 Body（`REFUSED: no seed`）→ G3 场景空选区 → F1 场景上一轮 datum 残留选区（`2 plane candidates`）。**5 个失败 = std_holes / edge.edges / lin.geo / cir.geo / mirror**，与首页计数一致，无矛盾。
+- **根因表**：
+  - P1 `M6x1.0` 被拒（生产解析器过严）：真实 NX_Thread_Standard.xml 中 M6 全名即 `Size="M6 x 1.0" Pitch="1"`；NormalizeSize 只规范化纯数字。**修复**（StandardHoleTable.cs）：NormalizeSize 拆 `M{nom}x{pitch}` 形；Lookup 阶段核验螺距与标准表一致（`ExtractRequestedPitch` + `GetThreadedPitch` 读真实表 M6→Pitch=1），**错螺距（M6x1.25）仍拒绝**、非螺纹族带螺距拒绝、深度字段仍取同一条记录行（语义未动）。
+  - P2 边数 24（测试夹具）：面遍历共享边未去重。**修复**：`CollectBlockEdges` 按 JournalIdentifier 去重 + 逐边核验归属同一 body（`edge.GetBody()`）。
+  - P3/P4 阵列无目标（测试夹具）：19/20 实体歧义拒绝是**生产保护正确**，夹具未传种子。**修复**：caseJ/caseK 每次调用前 `SelectInNx(种子)`（几何体模式选 Body、特征模式选特征）+ finally `ClearNxSelection()`；未关闭任何生产歧义保护。
+  - P5 mirror（测试夹具）：caseL G2 场景选区补入两个种子 Body；每场景前后清理选区。
+- **测试**：新增 `StandardHoleSizeNormalizationTests` 16 项（归一化 9 例、螺距提取、M6x1.0 查表、错螺距拒绝、裸名不回归、不支持规格拒绝、非螺纹族螺距拒绝、深度字段同源）。全量 **1013 项 = 1012 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 无空白错误、无无关改动。
+- **部署**（NX 关闭 ugraf=0；定向复制；未跑完整脚本）：4 DLL 哈希 MATCH——Core `00fd33df…`、UI `debe8bc8…`、NxHost `b5a5760a…`、Entry `0f2c30ed…`；菜单 `319ee927…` 未变。
+- **实机复验：未执行（不虚报）**。重跑完整自检预期 13/13；重点复验 M6x1.0 与 M6 双输入、caseI 边数 12、caseJ/K 实体数增量、caseL 三场景。
+
+## 2026-10-24 · Phase 10.4：实机自检三失败项修复（离线验证通过；已部署；复验待执行）
+
+- **P1 caseI.edge.chamfer 边引用失效**（phase.log 2125-2128 行）：chamfer 收到 **24** 条边（fillet 的 12 条已失效旧边残留全局选区 + 自身 12 条），revalidate 对 `EDGE*1*3` MISS。根因=**测试夹具选区污染**（RequestSelections 前未清列表）。**修复**：`SelectInNx` 先 `ClearGlobalSelectionList()` 再 `RequestSelections`（仍走真实选区路径，生产 revalidate 保护未动）。
+- **P2 caseK.cir.feat.count 断言错误**（2185-2186 行实机证据）：PatternFeature **提交成功**（alive、instances=6）且 **bodies 31→34（+3）**——圆形特征阵列把块实体自身阵列出真实实体副本（4 实例含源 → 3 新实体），与"线性孔特征阵列实体数不变"语义不同。**修复**：caseK 断言改为 `beforeFeat+3`（依据实机证据，非放宽）；成功消息同步。
+- **P3 caseL.mirror RuntimeBinderException**（2201 行）：`SelectDatumPlane` 无 `Add`。**反射确认**（tools/SelectionProbe 读真实 NXOpen.dll）：两平面属性是**单选持有者**——`SelectDatumPlane.Value : DatumPlane`、`SelectISurface.Value : ISurface`，均 `set_Value` 可赋。**修复**（MirrorToolExecutor）：`WireMirrorPlane` 重写为两个类型化重载（SelectDatumPlane/SelectISurface），`Value` 直接赋 DatumPlane/Face 引用；geometry 重载保持单基准面结构门；删除 dynamic+Add 路径。
+- **测试**：新增 `MirrorPlaneWiringTests` 2 项（typed Value 赋值、无 dynamic/Add 残留、单基准面门）；`GeometrySelfCheckCoverageTests` 更新 2 项（选区先清后设正则锁定、caseK 断言依据实机证据）。全量 **1016 项 = 1015 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 干净。
+- **部署**（NX 关闭 ugraf=0；**仅复制变化的 2 个 DLL**）：NxHost `682533f9…`、Entry `48ce1f85…` MATCH；Core `00fd33df…`、UI `debe8bc8…` 未动仍一致；菜单 `319ee927…` 未变。
+- **实机复验：未执行（不虚报）**。重跑完整自检预期 13/13；重点：caseI 两特征（12 边、BLEND/CHAMFER、生成面）、caseK feature（提交+实体 +3+源保留）、caseL 三场景（Value 赋值路径）、自检结束选区已清/临时部件关闭/工作部件恢复。
+
+## 2026-10-24 · Phase 10.4 后续：caseL.mirror.geo.face 平面面路径修复（离线验证通过；已部署；复验待执行）
+
+- **实机失败**（13/1）：`caseL.mirror.geo.face` — `InvalidOperationException: geometry 模式镜像面必须恰好一个基准面`（已回滚）。
+- **调用链追踪**：夹具选 [body, planarFace] → 选区解析通过（planarFaces=1）→ `WireMirrorPlane(mbb.Plane,…)` —— **mbb.Plane 编译时类型是 SelectDatumPlane**，C# 重载按编译时绑定到 geometry 重载，其守卫 `datumPlanes.Count != 1 → throw` 在 datumPlanes=0 时触发。
+- **根因=生产执行器能力缺口**：工具契约明确镜像面支持"基准面**或**普通平面面"（任务需求也明确不得限于 Datum Plane），选区解析两 kind 都收，但 geometry 模式的 wire 步骤只实现了基准面路径——平面面被"恰好一个基准面"守卫拦截。
+- **API 核实**（tools/SelectionProbe 反射真实 NXOpen.dll）：`SelectDatumPlane.Value` 仅接受 DatumPlane（SetValue(DatumPlane…)）；**Face 实现了 ISurface** 但 MirrorBodyBuilder.Plane 属性类型固定为 SelectDatumPlane——平面面无法直传。**可行生产路径**：从平面面真实几何（ReadPlanarFaceDefinition：AskFaceUvMinmax UV 中点 + AskFaceProps 原点/单位法向）`CreateFixedDatumPlane(origin, matrix)`（matrix Z 轴=面法向，右手系）创建**临时基准面**，`Value = tempDatum`；**提交成功后 `UFModl.DeleteFeature(临时datum所属Feature)` 删除**（反射验证：DatumPlane 无 Destroy，UFModl.DeleteFeature(Tag[]) 存在）；失败路径由既有 Undo 回滚清理。
+- **实现**（MirrorToolExecutor）：geometry 重载签名改为 `(SelectDatumPlane, Part workPart, …, out DatumPlane? tempDatumToDestroy)`——基准面路径不变；平面面路径=转换+提交后删除；守卫消息改为"基准面或平面面"。调用量点在 commit+DoUpdate 成功后删除临时 datum 并记录日志（删除失败仅记录，不影响镜像特征）。
+- **测试**：`MirrorPlaneWiringTests` 更新/新增 3 项（守卫消息、临时 datum 转换+DeleteFeature、验证读取路径对、UFEvalsf 禁令）。全量 **1017 项 = 1016 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 干净。
+- **部署**（NX 关闭 ugraf=0；**仅 1 个 DLL**）：NxHost `f490b5f1…` MATCH；Core/UI/Entry 未动仍一致；菜单 `319ee927…` 未变。
+- **实机复验：未执行（不虚报）**。重点：caseL.geo.face（平面面镜像成功且自检报告无残留辅助 datum）、caseL 另两场景回归、自检结束清理恢复正常。
+
+## 2026-10-24 · Phase 10.4 闭环：临时 datum 删除时机修复（离线验证通过；**部署被 NX 占用阻塞**）
+
+- **实机失败**（phase.log 2866-2869 行，顺序铁证）：`stage: commit` → `temp datum feature deleted (post-commit)` → `stage: DoUpdate` → `NXException: 试图使用不活动的对象`。**根因**：镜像特征在 `DoUpdate` 之前未求值——在 Commit 与 DoUpdate 之间删除临时 datum 的 feature，使未更新的镜像特征失去平面引用。
+- **修复**（MirrorToolExecutor）：临时 datum 的删除从"Commit 后立即"移至 **DoUpdate + 后置验证成功之后**（`tempDatumToDestroy` 提升为方法级变量；删除失败仅记录不影响镜像成功）。**未吞 NXException**——DoUpdate 阶段的异常仍走原 EXCEPTION-DETAIL 记录与回滚。
+- **测试**：新增 `TempDatum_DeletedOnlyAfterDoUpdate` 顺序锁（"post-update" 删除标记必须在 DoUpdate 之后；旧 "post-commit" 删除点已消失）。全量 **1018 项 = 1017 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 干净。
+- **部署（NX 退出后补跑完成）**：定向复制 NxHost DLL（唯一变化文件），SHA-256 核对 MATCH——NxHost `e14fe5e8…`；Core `00fd33df…`、UI `debe8bc8…`、Entry `48ce1f85…` 未动仍一致；菜单 `319ee927…` 未变；application 目录仅 4 DLL + selfcheck 种子。
+- **实机复验：未执行（不虚报）**。部署后重跑完整自检，重点 caseL.geo.face（平面面镜像成功+无残留辅助 datum）与清理恢复。
+
+## 2026-10-24 · Phase 10.4 闭环 v2：临时 datum 删除级联毁镜像——改为保留并托管（离线验证通过；已部署；复验待执行）
+
+- **实机失败**（phase.log 3205-3208 行）：`bodies=39→40`（提交+更新均成功、postcondition pass）→ `temp datum feature deleted (post-update)` → **caseL.geo.face.count 计数 39 ≠ 40**——**DeleteFeature 级联删除了依赖该 datum 的 MirrorBody**（镜像的平面定义依赖 datum，删除 datum 连带移除镜像体；DoUpdate 前删是"不活动对象"，DoUpdate 后删是"实体丢失"——同一依赖的两种表现）。
+- **修复（MirrorToolExecutor）**：临时 datum **不再删除**，改为**保留并托管**——它就是镜像体平面定义的支撑对象（NX 自身部件中长期保留 datum 是惯例）：`Layer = 250`（专用图层，不占常规层）+ `RedisplayObject()` + `Blank()`（不可见），仅命名尝试被 NXObject.Name 只读拦下后移除。DeleteFeature 路径整体移除。失败提交仍由既有回滚清理。
+- **测试**：`MirrorPlaneWiringTests` 更新（DeleteFeature 断言消失、Layer=250/Blank/kept 断言加入）。全量 **1018 项 = 1017 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 干净。
+- **部署**（NX 关闭 ugraf=0；仅 NxHost）：NxHost `697d1c6a…` MATCH；其余未动一致；菜单 `319ee927…` 未变。
+- **实机复验：未执行（不虚报）**。重点：caseL.geo.face（实体数 +1 保持、datum 在 250 层不可见）、caseL 另两场景、自检结束清理恢复。若用户要求物理删除辅助 datum，需改用"镜像后重建平面引用"的深路径（本轮未做，避免无证据猜测 API）。

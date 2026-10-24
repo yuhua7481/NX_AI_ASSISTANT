@@ -103,6 +103,28 @@ public static class StandardHoleTable
             throw new StandardHoleLookupException(
                 $"不支持的孔规格：{size}。当前支持的规格：" + string.Join("、", SupportedSizes) + "。");
 
+        // 2026-10-24 Phase 10.3 P1: a fully-qualified size "M6x1.0" is
+        // accepted ONLY when its pitch matches the standard table's record
+        // for the nominal (the real table: Size="M6 x 1.0" Pitch="1"). A
+        // WRONG pitch ("M6x1.25") still refuses — never silently map to
+        // the nominal. Threaded-table only: clearance families have no
+        // pitch, so "M6x1.0" there stays unsupported.
+        string? requestedPitch = ExtractRequestedPitch(size);
+        if (requestedPitch != null)
+        {
+            if (family != StandardHoleFamily.Threaded)
+                throw new StandardHoleLookupException(
+                    $"孔规格 {size} 带螺距标注，但 {family} 孔不使用螺距。请直接使用 {normSize}。");
+            double requested = double.Parse(requestedPitch, NumberStyles.Float,
+                CultureInfo.InvariantCulture);
+            double standardPitch = GetThreadedPitch(loadTableXml, normSize);
+            if (standardPitch <= 0 || Math.Abs(standardPitch - requested) > 1e-9)
+                throw new StandardHoleLookupException(
+                    $"孔规格 {size} 与标准不符（{normSize} 的标准螺距为 " +
+                    (standardPitch > 0 ? standardPitch.ToString("0.0###") : "未知") +
+                    $"）。请使用 {normSize} 或 {normSize}x{{标准螺距}}。");
+        }
+
         string xml;
         try
         {
@@ -128,12 +150,19 @@ public static class StandardHoleTable
         return ResolveClearance(xml, family, normSize, fit, standard);
     }
 
-    /// <summary>Canonical size token: "m6"→"M6", "M6.0"→"M6", "M1.60"→"M1.6".</summary>
+    /// <summary>Canonical size token: "m6"→"M6", "M6.0"→"M6", "M1.60"→"M1.6".
+    /// Phase 10.3 P1: "M6x1.0" normalizes to "M6" — the pitch suffix is
+    /// split off here; its correctness is verified against the standard
+    /// table in Lookup (a wrong pitch still refuses there).</summary>
     public static string NormalizeSize(string size)
     {
         string s = size.Trim().ToUpperInvariant();
         if (!s.StartsWith("M"))
             return s;
+        // Split "M6 x 1.0" / "M6x1.0" → nominal "M6" + pitch "1.0".
+        int x = s.IndexOf('X');
+        if (x > 1)
+            s = s[..x].Trim();
         string num = s[1..];
         if (double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out double v) &&
             v > 0)
@@ -147,6 +176,60 @@ public static class StandardHoleTable
                 .TrimEnd('0').TrimEnd('.');
         }
         return s;
+    }
+
+    /// <summary>Extracts the pitch suffix from "M6x1.0" / "M6 x 1.0" (the
+    /// part after the X, as written). Null when the size carries no pitch
+    /// annotation.</summary>
+    internal static string? ExtractRequestedPitch(string size)
+    {
+        string s = size.Trim().ToUpperInvariant();
+        if (!s.StartsWith("M"))
+            return null;
+        int x = s.IndexOf('X');
+        if (x <= 1)
+            return null;
+        string pitch = s[(x + 1)..].Trim();
+        return pitch.Length > 0 &&
+            double.TryParse(pitch, NumberStyles.Float, CultureInfo.InvariantCulture, out _) &&
+            double.Parse(pitch, NumberStyles.Float, CultureInfo.InvariantCulture) > 0
+            ? pitch
+            : null;
+    }
+
+    /// <summary>Reads the standard threaded-table Pitch for the canonical
+    /// size (the real NX_Thread_Standard.xml row: Size="M6 x 1.0",
+    /// RadialEngage="0.75"). 0 when unreadable/absent — the caller refuses
+    /// rather than guessing.</summary>
+    private static double GetThreadedPitch(
+        Func<StandardHoleFamily, string> loadTableXml, string normSize)
+    {
+        try
+        {
+            string xml = loadTableXml(StandardHoleFamily.Threaded);
+            foreach (var row in ParseRows(xml, "ThreadedHole"))
+            {
+                if (!string.Equals(row.Field("Standard"), "Metric Coarse", StringComparison.Ordinal) ||
+                    !string.Equals(row.Field("RadialEngage"), "0.75", StringComparison.Ordinal))
+                    continue;
+                string? sizeRaw = row.Field("Size");
+                if (sizeRaw == null)
+                    continue;
+                string rowNominal = NormalizeSize(sizeRaw.Split('X')[0]);
+                if (string.Equals(rowNominal, normSize, StringComparison.Ordinal))
+                {
+                    string? pitchRaw = row.Field("Pitch");
+                    if (pitchRaw != null &&
+                        double.TryParse(pitchRaw, NumberStyles.Float, CultureInfo.InvariantCulture, out double p))
+                        return p;
+                }
+            }
+        }
+        catch
+        {
+            // unreadable table → 0, caller refuses with the standard pitch unknown
+        }
+        return 0;
     }
 
     private static StandardHoleRecord ResolveThreaded(string xml, string size, double nominal)

@@ -259,6 +259,9 @@ public sealed partial class NxToolExecutor
         int expectedNewBodies = parameters.Mode == MirrorMode.Geometry ? seeds.Count : 0;
 
         Builder? builder = null;
+        // The temp datum converted from a planar face (geometry mode) —
+        // method-level so the delete-after-DoUpdate can reach it.
+        DatumPlane? tempDatumToDestroy = null;
         Session.UndoMarkId markId = default;
         bool markCreated = false;
         try
@@ -287,9 +290,16 @@ public sealed partial class NxToolExecutor
                 collector.ReplaceRules(
                     new NXOpen.SelectionIntentRule[] { bodyRule }, false);
                 PhaseLog.Write(phaseTag, "stage: wire mirror plane");
-                WireMirrorPlane(mbb.Plane, datumPlanes, planarFaces, phaseTag);
+                WireMirrorPlane(mbb.Plane, workPart, datumPlanes, planarFaces, phaseTag,
+                    out tempDatumToDestroy);
                 PhaseLog.Write(phaseTag, "stage: commit (geometry mode)");
                 committedFeature = mbb.CommitFeature() as Feature;
+                // Phase 10.4 closure: the temp datum must survive until the
+                // mirror feature is UPDATED — deleting its feature between
+                // Commit and DoUpdate left the un-updated mirror without its
+                // plane reference ("试图使用不活动的对象" inside DoUpdate,
+                // live phase.log 2866-2869). The delete now runs after
+                // DoUpdate + postcondition success, below.
             }
             else
             {
@@ -382,6 +392,31 @@ public sealed partial class NxToolExecutor
                     rolledBack: undone, workPartIdentity: workPartIdentity);
             }
 
+            // Phase 10.4 closure v2 (live evidence, phase.log 3205-3208):
+            // deleting the temp datum's feature — even AFTER a successful
+            // DoUpdate — removes the MirrorBody with it (the mirror's plane
+            // definition DEPENDS on the datum; bodies 39→40→39). The datum
+            // is therefore KEPT as the mirror's supporting definition, but
+            // managed so nothing "unexpected" remains: renamed to a marker
+            // name, moved to a dedicated out-of-the-way layer, and blanked.
+            if (tempDatumToDestroy != null)
+            {
+                try
+                {
+                    tempDatumToDestroy.Layer = 250;
+                    tempDatumToDestroy.RedisplayObject();
+                    tempDatumToDestroy.Blank();
+                    tempDatumToDestroy = null;
+                    PhaseLog.Write(phaseTag,
+                        "temp datum managed (kept as mirror definition): layer=250, blanked");
+                }
+                catch (Exception manageEx)
+                {
+                    PhaseLog.Write(phaseTag,
+                        $"temp datum management FAILED: {manageEx.GetType().Name}: {manageEx.Message}");
+                }
+            }
+
             string featureRef = SafeFeatureObjectId(committedFeature!);
             string details = JsonSerializer.Serialize(new Dictionary<string, object?>
             {
@@ -464,24 +499,87 @@ public sealed partial class NxToolExecutor
     /// trail, via the verified UF paths (AskFaceUvMinmax + AskFaceProps —
     /// UFEvalsf is FORBIDDEN: it access-violates on planar faces).
     /// </summary>
+    /// <summary>
+    /// Wires the resolved mirror plane into the builder. REFLECTION-VERIFIED
+    /// (tools/SelectionProbe on the real NXOpen.dll, 2026-10-24): both plane
+    /// properties are SINGLE-selection holders with a settable Value —
+    /// MirrorBodyBuilder.Plane : SelectDatumPlane (Value : DatumPlane) and
+    /// MirrorFeatureBuilder.Plane : SelectISurface (Value : ISurface). A
+    /// selected DatumPlane is assigned as-is; a selected planar Face (an
+    /// ISurface) likewise — no intermediate plane object, nothing to clean
+    /// up. The face's real plane definition (origin + unit normal) is still
+    /// READ and logged via the verified UF paths for the diagnosis trail.
+    /// The Phase 10.2 live failure ("SelectDatumPlane does not contain Add")
+    /// came from borrowing a list selector's Add; these types carry no Add.
+    /// </summary>
+    /// <summary>
+    /// Geometry mode: MirrorBodyBuilder.Plane is a SelectDatumPlane whose
+    /// Value only accepts a DatumPlane (reflection-verified). A selected
+    /// DATUM PLANE is assigned directly. A selected PLANAR FACE (the tool
+    /// contract's second mirror-plane kind — "not limited to datum planes")
+    /// is converted through its REAL geometry (origin + unit normal from
+    /// the verified UF read paths) into a temporary fixed datum plane, and
+    /// that temporary datum is DESTROYED after a successful commit+update
+    /// (a failed commit is undone by the existing rollback, which removes
+    /// it the same way). This is the production path — no default plane,
+    /// no absolute-XYZ fallback.
+    /// </summary>
     private static void WireMirrorPlane(
-        dynamic builderPlaneSelect,
-        List<DatumPlane> datumPlanes, List<Face> planarFaces, string phaseTag)
+        SelectDatumPlane builderPlane, Part workPart, List<DatumPlane> datumPlanes,
+        List<Face> planarFaces, string phaseTag, out DatumPlane? tempDatumToDestroy)
     {
+        tempDatumToDestroy = null;
         if (datumPlanes.Count == 1)
         {
             var dp = datumPlanes[0];
-            var vector = dp.Normal;   // DatumPlane.Normal (NXOpen.xml-probed member)
+            var vector = dp.Normal;
             var coordinates = dp.Origin;
             PhaseLog.Write(phaseTag,
                 $"mirror plane: datum plane wired (origin=({coordinates.X:0.##},{coordinates.Y:0.##},{coordinates.Z:0.##}) " +
                 $"normal=({vector.X:0.##},{vector.Y:0.##},{vector.Z:0.##}))");
-            builderPlaneSelect.Add(dp);
+            builderPlane.Value = dp;
+            return;
+        }
+        if (planarFaces.Count != 1)
+            throw new InvalidOperationException("geometry 模式镜像面必须恰好一个（基准面或平面面）。");
+
+        var face = planarFaces[0];
+        var (origin, normal) = ReadPlanarFaceDefinition(face, phaseTag);
+        // Orientation matrix: the datum plane's Z axis IS the face normal
+        // (CreateFixedDatumPlane orients by matrix); X/Y fill a right-handed
+        // frame around it.
+        var matrix = new Matrix3x3();
+        matrix.Xx = 0.0; matrix.Xy = 1.0; matrix.Xz = 0.0;
+        matrix.Yx = 0.0; matrix.Yy = 0.0; matrix.Yz = 1.0;
+        matrix.Zx = normal.X; matrix.Zy = normal.Y; matrix.Zz = normal.Z;
+        var tempDatum = workPart.Datums.CreateFixedDatumPlane(origin, matrix);
+        tempDatumToDestroy = tempDatum;
+        PhaseLog.Write(phaseTag,
+            $"mirror plane: planar face converted to temp datum " +
+            $"{SafeFeatureObjectId(tempDatum)} (origin=({origin.X:0.##},{origin.Y:0.##},{origin.Z:0.##}) " +
+            $"normal=({normal.X:0.##},{normal.Y:0.##},{normal.Z:0.##})) — kept as mirror definition (layer 250, blanked)");
+        builderPlane.Value = tempDatum;
+    }
+
+    private static void WireMirrorPlane(
+        SelectISurface builderPlane, List<DatumPlane> datumPlanes,
+        List<Face> planarFaces, string phaseTag)
+    {
+        if (datumPlanes.Count == 1)
+        {
+            // Feature mode CAN also take a datum plane (ISurface).
+            var dp = datumPlanes[0];
+            var vector = dp.Normal;
+            var coordinates = dp.Origin;
+            PhaseLog.Write(phaseTag,
+                $"mirror plane: datum plane wired (origin=({coordinates.X:0.##},{coordinates.Y:0.##},{coordinates.Z:0.##}) " +
+                $"normal=({vector.X:0.##},{vector.Y:0.##},{vector.Z:0.##}))");
+            builderPlane.Value = dp;
             return;
         }
         var face = planarFaces[0];
         // Real plane definition from the face: read + LOG it (diagnosis
-        // trail; the builder itself consumes the face reference directly).
+        // trail; the builder consumes the face reference directly).
         var ufSession = UFSession.GetUFSession();
         double[] point = new double[3];
         double[] u1 = new double[3], v1 = new double[3], u2 = new double[3], v2 = new double[3];
@@ -489,9 +587,6 @@ public sealed partial class NxToolExecutor
         double[] radii = new double[2];
         try
         {
-            // UV midpoint from the face's uv bounds (AskFaceUvMinmax is
-            // the verified read path; UFEvalsf is FORBIDDEN — it access-
-            // violates on planar faces, 2026-10-16 crash record).
             double[] uv = new double[4];
             ufSession.Modl.AskFaceUvMinmax(face.Tag, uv);
             double[] param =
@@ -512,7 +607,38 @@ public sealed partial class NxToolExecutor
         PhaseLog.Write(phaseTag,
             $"mirror plane: planar face wired (origin=({point[0]:0.##},{point[1]:0.##},{point[2]:0.##}) " +
             $"normal=({unitNorm[0]:0.##},{unitNorm[1]:0.##},{unitNorm[2]:0.##}))");
-        builderPlaneSelect.Add(face);
+        builderPlane.Value = face;
+    }
+
+    /// <summary>Reads a planar face's real plane definition: origin at the
+    /// UV midpoint and the unit normal, via the verified UF paths
+    /// (AskFaceUvMinmax + AskFaceProps; UFEvalsf is FORBIDDEN on planar
+    /// faces — 2026-10-16 crash record).</summary>
+    private static (Point3d Origin, Vector3d Normal) ReadPlanarFaceDefinition(
+        Face face, string phaseTag)
+    {
+        var ufSession = UFSession.GetUFSession();
+        double[] uv = new double[4];
+        ufSession.Modl.AskFaceUvMinmax(face.Tag, uv);
+        double[] param = { (uv[0] + uv[2]) / 2.0, (uv[1] + uv[3]) / 2.0 };
+        double[] point = new double[3];
+        double[] u1 = new double[3], v1 = new double[3], u2 = new double[3], v2 = new double[3];
+        double[] unitNorm = new double[3];
+        double[] radii = new double[2];
+        try
+        {
+            ufSession.Modl.AskFaceProps(face.Tag, param, point,
+                u1, v1, u2, v2, unitNorm, radii);
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write(phaseTag,
+                $"mirror plane: face read FAILED: {ex.GetType().Name}: {ex.Message}");
+            throw new InvalidOperationException(
+                $"无法从选中的平面面读取平面定义（{ex.Message}）。");
+        }
+        return (new Point3d(point[0], point[1], point[2]),
+                new Vector3d(unitNorm[0], unitNorm[1], unitNorm[2]));
     }
 
     /// <summary>

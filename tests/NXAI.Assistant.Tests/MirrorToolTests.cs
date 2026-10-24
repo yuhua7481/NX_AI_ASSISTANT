@@ -188,3 +188,67 @@ public class MirrorToolTests
         Assert.Contains("CommitFeature", reason);
     }
 }
+
+/// <summary>
+/// Phase 10.4 P3: the mirror plane wiring uses the REFLECTION-VERIFIED
+/// single-selection holders (SelectDatumPlane.Value / SelectISurface.Value)
+/// — the live failure was a borrowed list-Add that these types do not have.
+/// Pinned on the implementation source (the real wiring needs NX).
+/// </summary>
+public class MirrorPlaneWiringTests
+{
+    private static string ExecutorSource =>
+        File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+            "src", "NXAI.Assistant.NxHost.NX2512", "MirrorToolExecutor.cs"));
+
+    [Fact]
+    public void WireMirrorPlane_UsesTypedValueAssignment_NoDynamicAdd()
+    {
+        Assert.Contains("SelectDatumPlane builderPlane", ExecutorSource);
+        Assert.Contains("SelectISurface builderPlane", ExecutorSource);
+        Assert.Contains("builderPlane.Value = dp;", ExecutorSource);
+        Assert.Contains("builderPlane.Value = face;", ExecutorSource);
+        // The failed dynamic-Add path must be gone.
+        Assert.DoesNotContain("builderPlaneSelect.Add(", ExecutorSource);
+        Assert.DoesNotContain("dynamic builderPlaneSelect", ExecutorSource);
+    }
+
+    [Fact]
+    public void WireMirrorPlane_GeometryOverload_AcceptsPlanarFaceViaTempDatum()
+    {
+        // Phase 10.4 follow-up: the geometry-mode mirror accepts a selected
+        // PLANAR FACE (the tool contract's second mirror-plane kind) by
+        // converting its real plane definition into a fixed datum plane
+        // (CreateFixedDatumPlane with the face's normal as the Z axis),
+        // assigning it to the SelectDatumPlane.Value.
+        Assert.Contains("geometry 模式镜像面必须恰好一个（基准面或平面面）", ExecutorSource);
+        Assert.Contains("CreateFixedDatumPlane(origin, matrix)", ExecutorSource);
+    }
+
+    [Fact]
+    public void TempDatum_IsKeptAsMirrorDefinition_NeverDeleted()
+    {
+        // Phase 10.4 closure v2 (live evidence, phase.log 3205-3208): the
+        // committed MirrorBody DEPENDS on the temp datum — DeleteFeature
+        // removed the datum AND the mirror body with it (bodies 39→40→39,
+        // both before and after DoUpdate). The datum must be KEPT as the
+        // mirror's supporting definition and MANAGED instead: layer 250,
+        // blanked. The DeleteFeature path must be gone.
+        Assert.DoesNotContain("DeleteFeature(", ExecutorSource);
+        Assert.Contains("tempDatumToDestroy.Layer = 250;", ExecutorSource);
+        Assert.Contains("tempDatumToDestroy.Blank();", ExecutorSource);
+        Assert.Contains("kept as mirror definition", ExecutorSource);
+    }
+
+    [Fact]
+    public void WireMirrorPlane_ReadsFaceDefinitionViaVerifiedPaths()
+    {
+        // The conversion reads the face's REAL geometry — origin + unit
+        // normal through the verified UF pair; UFEvalsf is forbidden.
+        Assert.Contains("ReadPlanarFaceDefinition", ExecutorSource);
+        Assert.Contains("AskFaceUvMinmax", ExecutorSource);
+        Assert.Contains("AskFaceProps", ExecutorSource);
+        Assert.DoesNotContain("GetEvalsf", ExecutorSource);
+    }
+}
