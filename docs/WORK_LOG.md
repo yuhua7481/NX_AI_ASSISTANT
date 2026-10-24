@@ -454,3 +454,362 @@
 - **部署**：NxHost DLL SHA-256 一致（`77378ea1…`；NX 未运行）。
 - **实机验收（2026-10-18 07:45）**：几何自检 **4/4 全 ✓**——caseA (XY 圆 d30→拉伸 50, bbox 匹配) / caseB (XZ U45 d10 圆→绕 Z 360°，bbox 精确 (-50,-50,-5)–(50,50,5)) / caseC (四基本体) / caseD (失效引用安全拒绝)；**场景 B 端到端**对话链路成功——XZ 草图 SKETCH_000 创建→旋转 REVOLVED(2) 引用返回，AV 终结。
 - **遗留**：远端推送（GitHub 间歇不可达）；本轮为 caseB 专项收官，布尔三运算等其余实机待复验项保持既有清单。
+
+## 2026-10-20 · 倾斜轴 360° 旋转包络修复（实机验收通过；用户报告）
+
+- **实机故障**（自主模式，XY 平面 d20 圆形草图，用户选中的关联直线特征为轴，360°）：`REVOLVED(3)` 提交成功（`commit done: bodies 0→1`）后被 360° 精确包围盒验证**误拒回滚**——真实实体 AABB (-206.144,-10.000,-147.596)–(10.000,203.023,147.596) 与预测 (-206.223,-10.080,-144.723)–(10.080,203.103,144.723) 不符（Z 两端各差 2.873mm）。
+- **根因**（PhaseLog 10:43:53 链 + 数学重现）：`ComputeRevolveEnvelopeAabbCore` 对圆弧只采样圆心 ± r·e1/±r·e2 四点；对非轴对齐轴，圆周到轴的径向极值点位于任意方位角（本例 ~44.6°，恰在四采样点之间）→ maxR 低估 ~2.9mm（反推 r≈10 与 d20 草图吻合）。另经离线测试暴露结构性缺陷："全局轴向范围 × 全局 maxR" 圆柱界在轴向坐标与径向距离沿圆相关时（倾斜轴）会越界。
+- **修复**（新增 Core 纯数学 + NxHost 接入，commit `12e39ea`）：
+  ① `RevolveEnvelopeMath`：轴向范围闭式解 ± r·|n×u|（无采样）；逐轴极值函数 f±(θ)=u_i·t(θ)±s_i·r_p(θ) 用**确定性 Lipschitz 分支定界**求解（|f'| 界已证明，证书缺口 ≤ MaxRadialError=5×10⁻⁴mm）。
+  ② NxHost `ComputeRevolveEnvelopeAabbCore`：完整圆弧（|a1−a0|=2π）走精确数学；部分弧/直线/矩形路径不变。
+  ③ 修复过程中同步修正：`Vector` 移至命名空间级复用；一套"环面"测试预期被纠正（圆平面含轴时 360° 扫掠保持在自身平面内，Y 范围为 0 而非 ±r）。
+- **测试**：新增 `RevolveEnvelopeMathTests` 9 项——实机失败重现（倾斜轴 d20，maxR 与**独立稠密参考解**（10 万点扫描，非被测算法自证）一致且大于旧 4 点值）、逐轴包含性不变量（±0.01mm）、已知几何（X 轴上球体 [-10,10]³、XZ 圆绕 Y 平面含轴退化）、非法输入拒绝（零向量轴/负半径/非有限半径）。全量 Release **534 项 = 533 通过 / 0 失败 / 1 跳过**；git diff --check 通过。
+- **提交与部署**：commit `12e39ea` 快进推送至 `origin/recovery/pre-review-20261014-234252`（推送期间 GitHub 三次连接超时后成功）；`build.ps1` Release 构建并部署，Core `60e7cfc3…`、NxHost `455ebc5b…` 与构建产物一致（NX 已关闭）。
+- **实机验收（2026-10-20，证据来源：用户报告）**：自主模式执行——WCS XY 平面创建 d20 圆（局部 U=45、V=0）成功（SKETCH_000）；使用用户实际选中的关联直线特征为轴 360° 旋转，`REVOLVED(2)` **返回成功**；用户确认验证通过：**无 verify FAIL、无回滚**。原始日志目录未另行提供，以用户在对话中提供的执行结果为证。
+- **遗留**：本条仅关闭"倾斜轴 + XY 圆形草图 + 360° 旋转包络"失败案例；部分角度（60°/270°）事实驱动验证的进一步实机复验、以及其余 Phase 7 实机清单项，保持既有待验收状态。
+
+## 2026-10-20 · 布尔未知状态探针补充修复：归因快照（离线验证通过；实机复验待执行）
+
+- **补充根因**（前轮 `f55a574` 修复的遗留缺口）：`ProbeCommittedFeature` 对 `boolean_operation` 统一匹配 UNITE/SUBTRACT/INTERSECT 且**扫描全部工作部件特征**——零件中任何已有布尔特征都会被误当作本次未知操作的提交证据（待核差集 + 既有无关并集 → 误判"已提交"→ 拦截/恢复方向全错）；且结果描述固定报告第一个类型名（UNITE），与实际发现不符。
+- **修复**（FeatureToolExecutor.cs + NxToolExecutor.cs + ChatSessionController.cs）：
+  ① 归因快照：`INxToolExecutor` 新增只读 `ProbeFeatureSnapshot(toolName)`（按工具特征类型收集当前部件的 JournalIdentifier 集合）；控制器在**每次 BeginAttempt 之前**采集快照并按 ledger id 保存。
+  ② 归因探针：`ProbeCommittedFeature(toolName, summary, preExistingFeatureIds)`——匹配类型但**不在快照中**的特征才可归因于本次尝试（CommittedFound，消息报告**实际发现的特征类型**，不再固定 UNITE）；仅有快照内特征（操作前已存在）→ NotCommitted（消息说明"均为待核操作开始前已存在"）；**无快照且存在匹配特征 → 无法归因 → 返回 null 安全停止**（不猜测）。
+  ③ 控制器 `ResolveUnknownOutcome` 优先使用最新待决条目的快照调用三参探针。
+- **测试**：`BooleanAfterContinuousModelingTests` 扩至 **17 项**——待核差集+既有无关并集不误判（继续执行）、待核交集+既有差集不混淆（继续执行）、可归因新交集→恢复终结事实并停止（防重复）、无快照+存在匹配特征→安全停止不猜测、三种布尔操作（unite/subtract/intersect）×自主/确认模式全部到达执行器且参数解析正确、无效引用拒绝。7 个测试替身补齐新接口成员（1 处正则批量补丁造成的 4 处语法损伤已逐一手工修复）。全量 Release **551 项 = 550 通过 / 0 失败 / 1 跳过**。
+- **部署**：build.ps1 构建+部署成功（NX 已关闭），NxHost `2e1f1dd7…` 与构建产物一致。
+- **遗留（实机验收设计修正）**：账本为 NX 进程级内存状态，**重启 NX 后旧 Attempting 条目不存在**——实机验收须区分两类：①普通差集验收（重启 NX 后在隔离部件验证参数解析/执行/实体状态）；②未知状态恢复验收（须在同一 NX 会话内**确实制造**待核条目——例如取消一次布尔确认后立即重试——并实际触发宿主探针；无法安全复现时明确标记为待验证，不宣称通过）。
+
+## 2026-10-20 · 布尔未知状态探针二次补充：空快照基线与按操作类型归因（离线验证通过；实机复验待执行）
+
+- **两个遗漏**（`fb6214b` 归因快照修复的遗留）：
+  ① 快照判断用 `{ Count: > 0 }`——**非 null 的空集合**（快照成功采集且操作前没有匹配特征的有效基线）被误当成"无快照"，落入无法归因分支；
+  ② 探针对 `boolean_operation` 同时匹配 UNITE/SUBTRACT/INTERSECT 三种特征——待核差集遇到新出现的 UNITE（或交集遇到 SUBTRACT）会被误判为"本次已提交"。
+- **修复**（FeatureToolExecutor.cs + NxToolExecutor.cs + ChatSessionController.cs）：
+  ① 快照语义：null = 快照不可用（无法归因，安全停止）；**非 null 空集合 = 有效基线**（操作前无匹配特征，任何新出现匹配特征都可归因）。
+  ② 按操作类型归因：`FeatureKindsForTool` 接收结构化 `BooleanOperationType?`（unite→UNITE / subtract→SUBTRACT / intersect→INTERSECT，**绝不三合一**）；类型缺失时无法猜测→返回 null 安全停止。`ProbeFeatureSnapshot` 同样按类型采集快照。
+  ③ 控制器：BeginAttempt 前按 `BooleanParameters.Operation` 结构化确定特征类型并采集对应快照；恢复时将 (快照, 操作类型) 成对传给探针——探针使用的操作类型与产生待核条目的实际操作一致，不依赖自然语言摘要。
+- **测试**：`BooleanAfterContinuousModelingTests` 扩至 **21 项**——有效空快照+新 SUBTRACT→正确归因停止（防重复）；null 快照+存在匹配特征→安全停止；待核差集+新 UNITE→不误判（差集继续）；待核交集+新 SUBTRACT→不误判（交集继续）；三种操作×自主/确认模式参数解析与执行无回归。测试替身签名同步（3 参探针 + featureKind 快照）。全量 Release **555 项 = 554 通过 / 0 失败 / 1 跳过**。
+- **部署**：build.ps1 构建+部署成功（NX 未运行），NxHost/Core 与构建产物一致。
+- **遗留（实机验收设计，同前轮两类划分）**：①普通差集验收（重启 NX 后隔离部件）；②未知状态恢复验收（同一会话内确实制造待核条目并触发探针；无法安全复现时不宣称通过）。
+
+## 2026-10-20 · 更正：eefd752 测试计数记录修正（文档更正，无代码变更）
+
+- **更正内容**：上一条目（`eefd752`，探针按操作类型归因）记录的全量 Release 测试计数有误——实际运行 **556 项 = 555 通过 / 0 失败 / 1 跳过**，原记录 **555 项（554/0/1）少计 1 项通过**。专项测试 **21/21 通过**的记录不变。
+- **证据**：TRX 归档 `tests/NXAI.Assistant.Tests/TestResults/verify_eefd752_20261020/eefd752_full.trx`（555 Passed + 1 NotExecuted，退出码 0）；4 个部署 DLL 与对应 Release 构建产物 SHA-256 一致。
+
+## 2026-10-23 · Phase 9.2.1：修复四孔型工具 Schema 非法 JSON 实机错误（离线验证通过；已部署待实机复验）
+
+- **实机错误**（2026-10-23 08:09:14，用户报告）：输入"创建100*60*40块几何中心位于原点"→ `工具 create_threaded_hole 的 JSON Schema 不是合法 JSON（内部错误）。`
+- **根因**（对应排查分类第 1+4 种）：`StandardHoleTool.cs` 的 Schema 模板在 `["__REQ__"]` 与 `["__SIZES__"]` 处自带引号，而替换文本（`string.Join` 后的 `"size", "placement_face_ref", "unit"` 与九规格枚举）本身已带引号——展开产生 `[""size", …]` 非法 JSON，**四个孔型工具全部受影响**。`ModelService.SendAsync`（ModelService.cs:505-533）在**每次请求**构建 tools 载荷时统一解析全部 13 个工具 Schema，任一失败即整体 `InvalidRequest`——与提示词无关，"创建长方体"请求只是恰好触发，错误名取自循环中第一个失败工具。`create_block` Schema 本身一直合法（字面量无替换）。
+- **修复**（最小化，仅模板去两处引号）：`"required": [__REQ__]`、`"enum": [__SIZES__]`。工具参数契约、类型、必需字段、安全边界零改动；未触碰 NXOpen API、标准 XML、业务逻辑。
+- **测试**：新增 `ToolSchemaValidityTests` 5 项——①注册表全部 13 工具 Schema 经 `JsonDocument.Parse`（=ModelService 同款解析器）可解析；②序列化结构回环（type=object/properties/required 每项存在且带 type/additionalProperties=false）；③四孔型 Schema 枚举与深度字段解析后正确、`""` 双引号不再出现；④`create_threaded_hole` 不再触发内部错误；⑤`create_block` Schema 不变且有效。全量 Release **779 项 = 778 通过 / 0 失败 / 1 跳过**（退出码 0，无回归）。
+- **构建部署**：`build.ps1` Release 构建成功（0 警告 0 错误）；4 DLL 部署至 `deploy/nxai_custom/application`，SHA-256 与构建产物逐一一致——Core `227affa5…`、UI `51e0d823…`、NxHost `55363e15…`、Entry `47a4eaa5…`（NX 未运行）；startup 目录仅 nxai_assistant.men，无探针/日志/NXOpen 程序集混入。
+- **遗留（实机复验）**：用户重试"创建100*60*40块几何中心位于原点"确认 Schema 错误消失且长方体真实创建；四孔型按 C2–C7 清单抽查（沉头 M2/M1.6 结构化拒绝）。离线测试通过不等于实机通过。
+
+## 2026-10-22 · Phase 9.2：四种标准孔（螺纹/间隙/埋头/沉头）正式集成（离线验证通过；实机验收待执行）
+
+- **任务**：将此前已实机验证的孔探针（螺纹孔 9/9、Simple/Counterbored/Countersunk M6）整合进正式工具链，覆盖 36 种孔型×规格组合，部署到 `deploy/nxai_custom`。
+- **标准数据核查（NX2512 实际 XML，只读）**：
+  - 螺纹孔（`NX_Thread_Standard.xml`）：Metric Coarse + RadialEngage=0.75 九规格（M12→M1.6）全部唯一记录。
+  - Simple/Counterbored（`NX_Screw_Clearance_Hole_Standard.xml`）：ISO + General Screw Clearance / Socket Head 4762 + Close (H12) 九规格全部唯一记录。
+  - **Countersunk：ISO Socket Flat Head 10642 系列仅 M12–M3 有记录（7/9）——M2/M1.6 在该 ISO 标准中不存在**（DIN 95/97 Machine 系列才有）。按规则不套用其他标准数值：这两组实现为标准表级结构化拒绝（"没有匹配的标准记录"），并以离线测试钉死。
+- **已验证探针读取**（未复制进正式代码，按架构整合）：
+  - `C:\Users\yuhua\AppData\Local\Temp\threaded_hole_probe\{ScrewClearance,Counterbored,Countersunk}HoleProbe.cs`：HolePackageBuilder + SizeOfHole=ScrewClearance + 每族 TypeOfHole + 4 字符串属性（ScrewType/ScrewSize/ScrewStandard/ScrewFitOption，其中 ScrewStandard←表 Standard 字段是"找不到标准数据"修复）+ 全部 ScrewClearance* 表达式 SetFormula+读回 ±0.001 门。
+  - `E:\Templates\ThreadedHoleTableMultiProbe.cs`：SizeOfHole=Custom + TypeOfHole=ThreadedHole + ThreadStandard/ThreadSize/RadialEngageOption + 11 项 Threaded* 表达式同步 + 深度门（thread<hole）。
+- **主要文件**：
+  - 新增 `src/NXAI.Assistant.Core/StandardHoleTable.cs`：纯 XML 表解析（唯一匹配/缺失/歧义/不支持规格全部结构化拒绝，离线可测）。
+  - 新增 `src/NXAI.Assistant.Core/StandardHoleTool.cs`：四工具契约（create_threaded_hole / create_clearance_hole / create_counterbored_hole / create_countersunk_hole）+ 共享解析器（size 归一化、placement_face_ref 必填、螺纹深度成对提供且 thread<hole、埋头/沉头家族拒绝深度覆盖、diameter 永不接受）。
+  - `HoleToolExecutor.cs` 新增 `ExecuteCreateStandardHole`：运行时读取 NX 安装真实标准 XML（UGII_ROOT_DIR 优先、安装路径兜底）→ 唯一匹配 → 放置面解析/平面门/UF 面框（复用 create_hole 已验证路径）→ 逐字段 SetFormula+读回门（读回不一致不提交）→ Validate 门 → 提交 → DoUpdate → 后置验证（alive+body 数不变+JournalIdentifier 回环）→ 失败回滚。
+  - `CreateBlockTool.cs`（注册 4 工具）、`ExecutionMode.cs`（自主允许列表 +4）、`NxToolExecutor.cs`（接口 +1 方法）、`ChatSessionController.cs`（解析/路由/确认/分发）、`ToolConfirmationFlow.cs`（StandardHole 参数类型）、`AssistantChatForm.cs`（确认卡渲染：孔型中文名、规格、深度说明、放置面）。
+- **测试**：新增 `StandardHoleTableTests`（49 项：36 组合矩阵、值钉死对照实表、Metric Fine 不误匹配、缺失/歧义/解析失败/不支持规格拒绝、NormalizeSize 规范化）+ `StandardHoleToolContractTests`（44 项：四解析器、注册 13 工具、允许列表 13 项、schema/解析器字段一致、M2/M1.6 沉头拒绝、深度规则）+ 控制器路由 4 项 + 5 处旧 9 计数断言更新为 13（10 个测试替身补齐新接口成员）。全量测试结果见 PROJECT_STATUS 本轮条目。
+- **安全**：四工具均需确认（或自主模式按既有允许列表放行）；执行前工作部件/单位/确认部件路径校验；标准表缺失=拒绝不猜测；无任意代码执行面。
+- **遗留（实机验收待执行）**：四工具×规格抽样在真实 NX2512 隔离部件中验证（含沉头 M2/M1.6 拒绝提示、孔特征树与"螺纹表未找到"警告核查、确认卡、回滚、自主模式路径）。离线测试通过不等于实机通过。
+
+## 2026-10-23 · Phase 9.2.2：埋头孔语义修正——中文"埋头孔"路由到锥形沉孔（离线验证通过；已部署待实机复验）
+
+- **实机问题**（用户报告）：输入"创建一个 M8 埋头孔"→ 模型调用 `create_counterbored_hole`，NX 创建出**圆柱形台阶扩孔**，工具却报成功并称之为"埋头孔"。用户明确：**中文"埋头孔"应指锥形沉孔**。
+- **根因**（语义映射错误，非执行路径错误）：此前工具描述把"埋头孔"绑给了 Counterbored（圆柱沉头，ISO 4762），"沉头孔"绑给 Countersunk（锥形，ISO 10642）——与用户的中文习惯相反。两条 NX Builder 路径本身各自正确（Counterbored→`TypesOfHole.Counterbored`、Countersunk→`TypesOfHole.Countersink`），执行器从未混用。
+- **修复**（语义反转，代码路径不动）：
+  ① `create_countersunk_hole` 描述改称"锥形沉孔（Countersink，90° 锥面，ISO 10642）——用户所说'埋头孔'通常指本工具"，并保留"仅当用户明确要求创建埋头孔/锥形沉孔时调用"。
+  ② `create_counterbored_hole` 描述改为"圆柱形沉头台阶孔（平底，ISO 4762 让位孔）……中文'埋头孔'通常指锥形沉孔——用户说'埋头孔'时请改用 create_countersunk_hole"，不再自称"埋头孔"。
+  ③ 执行器成功消息明确报告**真实 NX 孔型**（锥形沉孔（Countersink，90° 锥面）/圆柱形沉头台阶孔（Counterbored）/螺纹孔/简单孔），details 增加 `nxHoleType` 字段；`StandardHoleTable`/NxHost/UI 三处族名文案同步（"埋头孔"→锥形沉孔、"沉头孔"→锥形沉孔、"圆柱形沉头台阶孔"）。
+  ④ **提交前孔型读回门**（防误报成功的结构性守卫）：提交前核对 `builder.TypeOfHole` 与请求家族一致（ThreadedHole/Simple/Counterbored/Countersink），不一致即拒绝提交——防止字符串赋值静默打回 builder 默认值导致"读回全对但几何形状错"。
+- **M8 锥形孔标准记录**（实际 XML 唯一匹配，已核）：Form=Countersunk + ScrewType='Socket Flat Head, 10642' + Size=M8 + Fit='Close (H12)' + Standard=ISO → HoleDiameter=8.4、CSinkDia=18.25、CSinkAngle=90、CSinkReliefDepth=1.2、Start/EndChamfer 0.6/45、HoleTipAngle=118。此前"沉头直径 15 / 深度 8.8"是 ISO 4762 圆柱头螺钉的**圆柱形扩孔**参数，属于 create_counterbored_hole 路径，不适用于锥形孔。执行器对 CSink* 字段逐项 SetFormula+读回 ±0.001 门，无猜值。
+- **测试**：`StandardHoleToolContractTests` 新增 5 项语义守卫（埋头孔词归 Countersunk 描述、锥形+10642 明示、Counterbored 描述自述圆柱并显式改派 Countersunk 工具、M8 锥形记录=CSinkDia 18.25/90°且无 CBore 字段、M8 圆柱记录=CBoreDia 15/8.8 保持独立）→ 49/49 通过。全量 Release **784 项 = 783 通过 / 0 失败 / 1 跳过**（退出码 0）。
+- **构建部署**：NX 未运行；`build.ps1` 成功（0 警告 0 错误）；4 DLL 部署 SHA-256 一致——Core `da79fa27…`、UI `d5b00b28…`、NxHost `844d35b5…`、Entry `e7f9f17c…`。`application\selfcheck\seed-mm.prt` 为既有自检种子（非本轮引入），保留。
+- **遗留（实机复验）**：用户重试"创建一个 M8 埋头孔"→确认真实几何为**90° 锥面沉孔**（沉头直径 18.25）、成功消息报告"锥形沉孔（Countersink）"、无螺纹表警告；圆柱台阶孔路径抽查一次确认仍独立正确。离线测试通过不等于实机通过。
+
+## 2026-10-23 · Phase 9.2.3：中文孔型映射定案——沉头孔=Counterbored（圆柱）、埋头孔=Countersink（锥形）（离线验证通过；已部署待实机复验）
+
+- **实机证据**（用户报告）：输入"创建M8沉头孔"→ 模型调用 `create_countersunk_hole`，生成 `COUNTERSUNK SCREW HOLE(2)`（锥形）；同时用户确认"埋头孔"已正常创建锥形孔。用户指出此前 9.2.2 的描述把两个词都引向了锥形工具。
+- **正式中文映射（用户 2026-10-23 定案，项目正式规定，不按外部习惯调换）**：
+  - 沉头孔 → `create_counterbored_hole` → `TypesOfHole.Counterbored`（圆柱形扩孔、平底台阶，ISO 4762）
+  - 埋头孔 → `create_countersunk_hole` → `TypesOfHole.Countersink`（锥形扩孔、斜面，ISO 10642）
+  - 螺纹间隙孔 → `create_clearance_hole` → `TypesOfHole.Simple`（普通螺钉过孔，无内螺纹）
+  - 螺纹孔 → `create_threaded_hole`（内螺纹孔）
+- **修复**（仅工具描述与显示文案，几何/标准表/执行路径零改动）：
+  ① `create_counterbored_hole` 描述改称"标准沉头孔：圆柱形扩孔、平底台阶……当用户明确说'沉头孔'（或'圆柱形沉头孔/台阶孔/让位孔'）时必须调用此工具；不可用于锥形埋头孔"，并声明 NX 类型 `TypesOfHole.Counterbored`。
+  ② `create_countersunk_hole` 描述改称"标准埋头孔：锥形扩孔、斜面……当用户明确说'埋头孔'或'锥形埋头孔'时调用此工具；**用户只说'沉头孔'时，不可调用此工具**（沉头孔=圆柱形平底台阶，用 create_counterbored_hole）"，并声明 `TypesOfHole.Countersink`。
+  ③ `create_clearance_hole` 描述认领"螺纹间隙孔"并明示"不创建内螺纹"；`create_threaded_hole` 描述认领"螺纹孔"并声明 `TypesOfHole.ThreadedHole`。
+  ④ `StandardHoleTable`/NxHost 成功消息/UI 确认卡四处族名同步：沉头孔（Counterbored）/埋头孔（Countersink）/螺纹间隙孔/螺纹孔；成功消息 NX 孔型文案改为"锥形埋头孔（Countersink，90° 锥面）"/"圆柱沉头孔（Counterbored，平底台阶）"。9.2.2 中"用户说'埋头孔'时请改用…"的反向改派文案删除，消除双词歧义。
+- **路由层核查**：`ChatSessionController.StandardHoleFamilyForTool` 按工具名（英文常量）确定性映射，无中文别名硬编码；自然语言的词→工具选择完全发生在模型侧，本地唯一路由面是工具 Description——四条描述现已互斥（Counterbored 独占"沉头孔"，Countersink 独占"埋头孔"并显式拒绝仅"沉头孔"请求）。
+- **测试**：`StandardHoleToolContractTests` 重写语义守卫（Counterbored 独占"沉头孔"+TypesOfHole 声明+拒绝锥形；Countersunk 独占"埋头孔"+"只说'沉头孔'时不可调用"+指回 Counterbored 工具；Clearance/Threaded 认领各自中文词；工具名→family→NX 孔型确定性映射；无"埋头孔/沉头孔"混合歧义文案）→ **53/53 通过**。全量 Release **788 项 = 787 通过 / 0 失败 / 1 跳过**（退出码 0）。
+- **构建部署**：NX 未运行；`build.ps1` 成功（0 警告 0 错误）；4 DLL 部署 SHA-256 一致——Core `cca9aa12…`、UI `eb029638…`、NxHost `7adae5fa…`、Entry `c47438c0…`；`nxai_assistant.men` 源/部署哈希相同（`319ee927…`，字节级未变，本轮未修改菜单）。
+- **限制声明**：单元测试能保证工具描述互斥、工具名→孔型映射确定、M8 两族标准记录独立（Counterbored CBoreDia 15/CBoreDepth 8.8；Countersink CSinkDia 18.25/90°）；**不能保证模型对任意自然语言输入必然选择正确工具**——该选择由模型基于描述做出，须实机验证。
+- **遗留（实机复验）**："创建M8沉头孔"→圆柱形平底台阶孔（CBoreDia 15/深 8.8）；"创建M8埋头孔"→锥形孔（CSinkDia 18.25/90°）；两个结果均以真实执行记录和 NX 几何为准。离线测试通过不等于实机通过。
+
+## 2026-10-23 · Phase 9.3：四种标准孔支持"选定点"放置（离线验证通过；已部署待实机验收）
+
+- **实机问题**（用户报告）：选中一个点（NX 上下文显示 `PointFeature`）后输入"创建M6螺纹孔"，插件提示"选中的对象是一个点，不是平面"。现有流程只支持选面中心。
+- **参考实现**（用户提供的实机录制 journal，`E:\Templates\journal.cs`）：`PointFeature`→`FindObject("POINT 1")`→`NXOpen.Point`（模型坐标）；点的 Section 挂载 = `CreatePoint(point, null Xform, WithinModeling)` + `CreateRuleCurveDumbFromPoints` + `AddToSection`——与现有 position section 模式一致，仅来源点不同。
+- **根因**：`NxContextReader.DescribeFeature` 把选中的 PointFeature 归为 `Kind="feature"` 不带坐标；契约要求 `placement_face_ref`（点模式无此引用）→ 双重阻断。
+- **实现**（沿用既有架构，最小扩展）：
+  ① **上下文层**（NxContextReader）：PointFeature 经 `Feature.GetEntities` 解析为唯一 `NXOpen.Point`（0/多点如实标注不可解析，不猜坐标）→ `Kind="point"` + `Subtype="point_feature"` + 模型 XYZ；独立点 `Subtype="point"`。`NXOpen.Point.Coordinates` 即模型坐标（草图点同为模型空间对象，草图 2D 坐标不外泄）。
+  ② **契约层**（StandardHoleTool）：新增 `placement_mode`（`selected_face_center` 默认 / `selected_point`）+ `StandardHolePlacementMode` 枚举；点模式下 `placement_face_ref` 必须缺省（提供即拒绝）、`location_u/v` 不支持；面中心模式原规则不变（缺 face_ref 的拒绝信息教模型改用 selected_point）。四工具 Schema 增加枚举字段、`placement_face_ref` 移出 required（条件必填）；四条描述同步说明两种放置方式。模型永不传坐标——点由宿主从**当前实际选区**解析。
+  ③ **执行器**（HoleToolExecutor.ExecuteCreateStandardHole）：新增 `ResolveSelectedPointForHole`——当前选区解析唯一点，接受三类来源：独立 `NXOpen.Point` / `PointFeature`（GetEntities 解析，必须恰 1 个活点）/ 草图（`GetAllGeometry` 仅当**恰含 1 个点**时接受；0 或多点拒绝并要求用户明确选点，绝不擅自挑选）；多选/混选/无选择均拒绝。`FindUniqueSolidPlanarFaceContaining`——扫描工作部件所有实体（排除片体）的平面：面属活实体 + 平面 + 点到平面距离 ≤0.01mm（与 section 容差一致）+ **UV 参数域内包含**（点在无限平面上但超出面域即拒绝；参数增量 = 面内偏移÷导数模，平面导数恒定）+ 多面交界（>1 匹配）拒绝。孔心=选定点原坐标（不吸附、不投影、不回退面中心）；方向沿用面法向既有逻辑。全程 PhaseLog 记录：点来源/坐标、匹配面与体、距离与 UV 包含验证值、模式与方向。
+  ④ **UI**：确认卡与请求描述区分两种模式（"选定点（孔心=该点，放置面由宿主解析）"）。
+- **测试**：新增 12 项（四族点模式解析、点模式带 face_ref/location 拒绝、非法/非字符串 placement_mode 拒绝、面中心缺 face_ref 拒绝且提示 selected_point、四 Schema 广告 placement_mode 枚举且 placement_face_ref 不再 required、点→面接受/拒绝几何规则离线数学（面内/出界/离面/容差外）、多面歧义规则）→ 孔相关 119 项全通过。全量 Release **800 项 = 799 通过 / 0 失败 / 1 跳过**（退出码 0）。
+- **构建部署**：NX 未运行；build.ps1 成功（0 警告 0 错误）；4 DLL SHA-256 一致——Core `66d7ef49…cbadc`、UI `070d8be6…1c76a`、NxHost `066cc0bb…b7451`、Entry `37f8ec7f…1ae55`；菜单字节级未变（`319ee927…`）。备份：`D:\AI\NX_AI_ASSISTANT_point_backup_20261023_103056`。
+- **待实机验收**（一次性测试零件，草图点与三维点各一，均位于实体平面内部）：①选三维点 →"创建M6螺纹孔"→ 孔心=点坐标（非面中心）、无螺纹表警告；②选草图点 → 同上；③选整个草图（多点）→ 拒绝要求明确选点；④点在面边缘/外 → 拒绝不回退；⑤四种孔型点放置路径抽查；⑥原选面中心回归。离线测试通过不等于实机通过。
+
+## 2026-10-23 · Phase 9.4：倒圆角与倒斜角正式集成（离线验证通过；已部署待实机验收）
+
+- **参考 journal 分析**（用户提供，仅作实现参考）：
+  - `Round corners of R2.cs`：`Features.EdgeBlendBuilder`（`FeatureCollection.CreateEdgeBlendBuilder(Feature)`）+ `ScCollector` + `EdgeMultipleSeedTangentRule(seedEdges, 0.5, true)` + **`AddChainset(collector, "2")`——半径是链集的表达式字符串**（mm），非独立属性；Tolerance=0.01；提交 `CommitFeature()`；特征类型 `EdgeBlend`。
+  - `Inverted C2 bevel.cs`：`Features.ChamferBuilder`（`CreateChamferBuilder(Feature)`）+ `EdgeTangentRule` 挂 `SmartCollector` + **对称距离经 `FirstOffsetExp.SetFormula("2")` 写入**（C2=对称等距 2mm，`ChamferOption.SymmetricOffsets`）；`Option` 枚举 = SymmetricOffsets/TwoOffsets/OffsetAndAngle，Method = EdgesAlongFaces/FacesAndTrim。
+  - 两个 journal 都未展示非对称倒角路径——正式工具只实现 SymmetricOffsets（不可靠的模式不做）。
+- **API 核验**（NXOpen.xml 元数据）：`ChamferBuilder.Option/Method/Angle/FirstOffset/SecondOffset/FirstOffsetExp/SmartCollector/Tolerance`、`EdgeBlendBuilder.AddChainset(ScCollector,string)/GetChainsetAndSectionValue(...)/Tolerance/RemoveSelfIntersection` 等、工厂 `CreateChamferBuilder(Feature)/CreateEdgeBlendBuilder(Feature)`、规则 `CreateRuleEdgeDumb(Edge[])`。
+- **正式实现**（新增 `create_fillet` / `create_chamfer`，全链路同既有工具）：
+  - 契约（Core/EdgeFinishTools.cs）：fillet 收 radius、chamfer 收 distance（正数、≤1000mm 上限、unit 换算）；**目标边不进契约**——模型永不传边引用，宿主从当前选区解析。描述互斥（fillet 不提倒斜角；chamfer 明示 SymmetricOffsets 对称等距、非对称"暂不支持"）。
+  - 执行器（NxHost/EdgeFinishToolExecutor.cs）：`ResolveSelectedEdges`——当前选区只接受实体 Edge（Feature 节点仅当解析出恰 1 条活边；混入非边目标即拒绝，不静默处理子集；去重按 JournalIdentifier）；确认后 `RevalidateEdges` 重验证每条边仍活着；**用 `CreateRuleEdgeDumb` 而非 journal 的相切链规则**（相切规则会吸收用户未选的相切邻边——工具不得触碰未选边）。圆角：`AddChainset(collector, radiusExpr)` + `GetChainsetAndSectionValue` 读回半径表达式 ±0.001 门；倒角：`Option=SymmetricOffsets` + `FirstOffsetExp.SetFormula` + 读回门 + **Option 提交前读回门**。后置验证：特征活、body 数不变、FeatureType 必须为 EDGE_BLEND/CHAMFER（错型即回滚）、JournalIdentifier 回环；Undo mark、失败回滚、Builder Destroy 全套沿用。
+  - UI：解析分支、确认卡（半径/距离+目标说明）、执行分派、待办描述；自主允许列表 +2。
+- **测试**：新增 `EdgeFinishToolContractTests` 25 项（R2/C2 解析与单位换算、非法半径/距离拒绝、1000mm 上限、未知字段拒绝、chamfer 拒绝 angle 字段（offset+angle 模式未提供）、注册 15 工具、允许列表 15 项、Schema 解析与 required 正确（radius vs distance 不互换）、描述互斥（fillet 不提倒斜角、chamfer 钉死 SymmetricOffsets+对称+暂不支持）、两条路由到执行器）。计数断言 13→15 七处更新；10 个测试替身补齐 2 个新接口成员。全量 Release **825 项 = 824 通过 / 0 失败 / 1 跳过**（退出码 0）。
+- **构建部署**：NX 未运行；build.ps1 成功（0 警告 0 错误）；4 DLL SHA-256 一致——Core `76d86b68…946c`、UI `4ed0497d…1b96`、NxHost `5fd3c6c1…416a`、Entry `e8ae1245…0905`；菜单字节级未变（`319ee927…`）。备份：`D:\AI\NX_AI_ASSISTANT_edgefinish_backup_20261023_112521`。
+- **待实机验收**：一次性部件选边 →"给当前选中的边倒 R2 圆角"→ 确认卡半径 2、特征 EDGE_BLEND、真实圆角几何；选边 →"给当前选中的边倒 C2 斜角"→ 特征 CHAMFER、对称 2mm；取消无几何变化；空选/选面等无效目标清晰拒绝；失败回滚。离线测试通过不等于实机通过。
+
+## 2026-10-23 · Phase 9.4.1：修复圆角后置验证误回滚（type=BLEND 被 EDGE_BLEND 误判 + 回滚顺序；离线验证通过；已部署待实机复验）
+
+- **实机日志链**（用户提供 + `%TEMP%\NXAI_Assistant_phase.log` 逐行核实）：边解析成功（1/2/4/12 条）→ Chainset 添加成功 → 半径读回正确（`radius expr '3' readback=3 delta=0`）→ `CommitFeature()` 返回 `EdgeBlend BLEND(2) type=BLEND update=ok` → `alive=True bodyCount=1→1` → **`roundTrip=False` 判定失败并回滚** → 回滚后 Builder Destroy 报 `NXException: 试图使用不活动的对象`。`execute.chamfer` 无任何日志（本轮只修圆角；倒角待单独核实）。
+- **根因**（对照代码逐一确认）：
+  ① **类型误判**：代码要求 `FeatureType=="EDGE_BLEND"`，真实 NX 返回 **`BLEND`**（实机日志证实）→ roundTrip 第一个子条件即 false。
+  ② **roundTrip 依赖不稳定的 JournalIdentifier 字符串回环**（在工作部件特征树重找特征）——即使类型名修正也不可靠。
+  ③ **清理顺序错误**：先 `UndoToMark` 回滚（使 Builder 失效）再 `Destroy()` → "试图使用不活动的对象"。
+  ④ `expectedPart=(null)` 不影响判定（TryResolveWorkPart 对空路径跳过部件一致性检查，属既有约定）；bodyCount 1→1 通过。
+- **修复**（EdgeFinishToolExecutor.cs，验证不关闭、只换可靠证据）：
+  ① 类型判定改为**托管类型精确检查** `committedFeature is NXOpen.Features.EdgeBlend / is NXOpen.Features.Chamfer`（NXOpen.xml 核实的真实类，编译期保证），不再比较 FeatureType 字符串。
+  ② 归属证明改为 `Feature.GetFaces()`（NX1899+ API，"faces created by the feature"）**非空**——圆角/倒角必然产生新面，零面=未实际生效；这是可验证的几何证据。判定逻辑提取为纯函数 `EdgeFinishPostcondition(committed, alive, typeMatches, faceCount, bodiesBefore, bodiesAfter)`，每个子条件独立、失败原因互异（离线可测）。
+  ③ **清理顺序**：验证失败与异常路径均改为**先 Destroy builder（置 null 防重复销毁）再 UndoToMark 回滚**；destroy 失败只记日志不掩盖原判定；成功路径 finally 幂等清理不变。
+- **测试**：新增 `EdgeFinishPostconditionTests` 9 项（实机失败案例重现：BLEND 健康提交必须 PASS；无特征/死特征/错类型/零面/body 数变化各自失败且原因互异；执行器源码含 `is EdgeBlend/is Chamfer` 且无 `== "EDGE_BLEND"` 残留）。NxHost csproj 加 InternalsVisibleTo（同 Core 模式）。边加工 34 项全通过；全量 Release **834 项 = 833 通过 / 0 失败 / 1 跳过**（退出码 0）。
+- **构建部署**：NX 未运行；build.ps1 成功（0 警告 0 错误）；4 DLL SHA-256 一致——Core `76d86b68…`（未变）、UI `4ed0497d…`（未变）、NxHost `a7dc829b…c3ecc`（**本轮唯一变化**）、Entry `d884958f…`（未变）；菜单字节级未变。备份：`D:\AI\NX_AI_ASSISTANT_postfix_backup_20261023_122042`。
+- **待实机复验**：重新执行"给选中的边倒 R2 圆角"→ 特征**保留不被撤销**、真实圆角几何生效、日志出现 `postcondition verdict: pass=True`；倒斜角随后单独核实（可能存在同型后置验证问题——其 FeatureType 需实机确认）。离线测试通过不等于实机通过。
+
+## 2026-10-23 · Phase 9.5：自主几何感知——空选区自动解析"周边"目标（离线验证通过；**部署被 NX 占用阻塞**）
+
+- **需求**（产品方向升级）：人工预选不得成为自动建模的常规前置。空选区时助手应从最近成功的建模结果 + 当前特征树 + 实际几何解析目标；"没选对象"≠"无法定位对象"。
+- **架构**（职责分离，复用既有层）：
+  - **意图→候选**：控制器新增 `LastCreatedBodyRef`（仅记录**执行器验证成功**结果 DetailsJson 里的 `newBodyRef`，如 BLOCK(5)；模型文本永不作为来源）+ `ResetTargetResolution()`（新对话清空，防复用失效引用）；执行器经 `NxTargetResolutionSink` 接口以委托读取（每次解析现读，非陈旧副本）。
+  - **决策**（Core/EdgeTargetResolution.cs，纯函数离线可测）：候选数量规则（0 实体拒/单实体取/有记忆引用取候选/多实体无引用拒并请示）；**"周边"安全规则**——仅当 Body 为**标准长方体**（6 平面、12 线性边、每边 2 顶点、8 顶点各 3 边、每面四边）时解析为全部 12 条外棱边；任何不满足（7 面/11 边/曲面/顶点异常）都拒绝并说明原因+指引，绝不扩大选择。
+  - **几何采集**（NxHost/EdgeFinishToolExecutor）：`ResolveEdgeFinishTarget` 三级决策——①选区含边→用选区（场景 B 原行为不动）；②选区非空但无边→保留原有诊断拒绝；③空选区→读记忆候选→`FindLiveBodyByRef` 在**活部件**重新解析（已删/已撤销即拒）→`CollectBodyEdgeFacts`（Face/Edge/顶点实测，AskFaceProps 同款只读路径）→长方体判定→收集 12 条真实边（JournalIdentifier 去重、实测数≠12 再拒）。确认后既有 `RevalidateEdges` 再次验证每条边仍活。
+  - **执行**：圆角/倒角 Builder 路径与 9.4.1 后置验证完全未动；两工具共用目标解析。
+- **工具描述**：create_fillet/create_chamfer 增加三级放置说明（选中边优先/空选区对刚创建长方体解析周边 12 棱边/不明确则拒绝）。
+- **测试**：新增 `EdgeTargetResolutionTests` 12 项（标准长方体→12 边、六类非标准形状拒绝且原因含指引、0/单/多实体与记忆引用决策、控制器生命周期）+ 控制器 4 项（成功结果记录 ref、失败不记录、Reset 清空、执行器 sink 默认 null fail-safe）→ 16 项新测试。全量 Release **850 项 = 849 通过 / 0 失败 / 1 跳过**（退出码 0）。
+- **构建**：Release 0 警告 0 错误。**部署被阻塞**：build.ps1 复制 Core.dll 时 NX（ugraf.exe）正在运行、DLL 被占用，`Copy-Item` IOException 中止。按规则未强行覆盖、未终止用户进程。**待 NX 完全退出后重跑 `powershell -ExecutionPolicy Bypass -File build.ps1` 完成部署**（构建产物已就绪）。备份：`D:\AI\NX_AI_ASSISTANT_target_backup_20261023_130215`。
+- **待实机验收**（部署后）：①创建 60×60×60 长方体→清空选择→"周边倒 R3 圆角"→确认卡显示目标与 12 边→确认→圆角保留；②"给刚创建的长方体所有棱边倒 R3"；③多实体歧义拒绝；④已修改实体（打了孔）拒绝；⑤新对话不复用失效引用；⑥选中边场景回归；⑦倒斜角对应检查。
+
+## 2026-10-23 · Phase 9.5 部署补记：NX 退出后重跑 build.ps1，部署完成
+
+- **部署**：NX（ugraf.exe）退出后重跑 `build.ps1`——构建 0 警告 0 错误，4 DLL 复制成功；SHA-256 与构建产物逐一一致——Core `00915c81…bdb1a`、UI `6993df03…bd34d`、NxHost `33484dc5…4c35b`、Entry `f4e794a2…a370c`；菜单字节级未变（`319ee927…`）；application 目录仅 4 DLL + 既有 selfcheck 种子，无杂物。
+- **状态**：Phase 9.5 部署核验通过；实机验收清单见 PROJECT_STATUS 下一项任务。Git 无操作。
+
+## 2026-10-23 · Phase 9.6：线性阵列正式集成——特征/几何体双模式（离线验证通过；已部署待实机验收）
+
+- **需求**：create_linear_pattern，必须显式区分**阵列特征（PatternFeature）**与**阵列几何体（PatternGeometry）**两种模式（用户提供实机 journal："阵列特征"=PatternFeatureBuilder、"阵列几何特征"=PatternGeometryBuilder）。
+- **API 核验**（**真实程序集反射**，临时探针工具 `System.Reflection.MetadataLoadContext` 直读 `NXBIN\managed_core\NXOpen.dll`，非猜名）：
+  - `PatternFeatureBuilder`（`FeatureCollection.CreatePatternFeatureBuilder(Feature)`）：`FeatureList`(SelectFeatureList)、`PatternMethod{Variational,Simple,SingleOutput}`、`OutputOption{PatternFeature,CopiesOfInputFeatures,CopiesOfInputFeaturesInGroup}`、`PatternService`(PatternDefinition)、`ReferencePointService.IsReferencePointInferred`（替代已弃用 UseInferredReferencePoint）、`SetReferencesToReuse(Feature,NXObject[])`。
+  - `PatternGeometryBuilder`（`CreatePatternGeometryBuilder(PatternGeometry)`）：`GeometryToPattern`(SelectDisplayableObjectList，接受 bodies/faces/curves/datum 等——**本工具仅支持 Body 种子**，face/curve 阵列的额外约束未验证不做)、`HideOriginal`、`IsAssociative`、`CopyThreads`。
+  - 共用：`PatternDefinition`（`PatternType{Linear,…}`）→ `RectangularDefinition`(RectangularPattern)：`XDirection`(Direction，`Part.Directions.CreateDirection(Point3d,Vector3d,UpdateOption)`)、`UseYDirectionToggle`(1-D 保持 false)、`XSpacing`=**`DistancePatternSpacing`**（`SpaceType`=Offset 逐实例间距、`NCopies` Expression、`PitchDistance` Expression）。
+  - 提交后类型：`Features.PatternFeature` / `Features.PatternGeometry`（均含 `GetAllContainedFeatures`/`GetAssociatedBodies` 实例证据 API）。
+- **实现**（新 Core/LinearPatternTool.cs + NxHost/LinearPatternToolExecutor.cs）：
+  - 契约：`mode`（feature/geometry，**必填显式**——两种模式对应不同 Builder 与目标类型，禁止默认归 Feature）、`direction`（6 个绝对轴向枚举，**方向永不猜测**，无法确定先问用户）、`count`（2–100 整数，含原始实例）、`pitch`（正数 ≤1000mm）、`include_seed`（默认 true）。
+  - 目标解析：Feature 模式=控制器记忆的 `LastCreatedFeatureRef`（本轮新增，来自标准孔/圆角/倒角执行器成功结果的 featureRef）；Geometry 模式=`LastCreatedBodyRef`；均为执行器验证过、执行时在活部件重解析（失效即拒）；模型永不传对象引用。
+  - 执行：PatternMethod=Simple + OutputOption=PatternFeature（特征模式）；IsAssociative=true + HideOriginal=false（几何模式，原始保留）；1-D 线性定义（XDirection+XSpacing，Y 不启用）；表达式设置后记录读回（copies/pitch 值）。
+  - 后置验证（纯函数 `LinearPatternPostcondition`，子条件离线可测）：托管类型匹配（is PatternFeature/is PatternGeometry）、存活、**Feature 模式实例证据**（GetAllContainedFeatures 非空）、**Geometry 模式 body 数增长=副本数**（count−seed，源不计入新增）、失败先 Destroy 后回滚（9.4.1 顺序）。
+  - 控制器：`LastCreatedFeatureRef` 记录/清空与 bodyRef 同套生命周期；确认卡显示模式/目标/方向/数量/间距。
+- **测试**：新增 `LinearPatternToolTests` 26 项（双模式解析、13 类非法输入拒绝含 mode 缺失/direction 猜测禁止/count 非整与越界/pitch 非法、注册 16 工具、Schema required、描述双模式+自动解析+方向先问、后置判定 6 子条件、路由）。计数断言 15→16 七处（修正一处误伤的 depth:15 断言）；10 个测试替身补新接口成员。全量 Release **876 项 = 875 通过 / 0 失败 / 1 跳过**（退出码 0）。
+- **构建部署**：NX 未运行；build.ps1 成功（0 警告 0 错误）；4 DLL SHA-256 一致——Core `cd9afa12…87ab`、UI `858b74c7…f5a`、NxHost `99fa05d4…eed0`、Entry `6bcc7e97…69de`；菜单未变（`319ee927…`）。备份：`D:\AI\NX_AI_ASSISTANT_linpat_backup_20261023_154413`。
+- **待实机验收（两种模式分别报告，不得互相代表）**：
+  - 特征模式：创建孔特征 →"把这个孔特征沿 +X 阵列 4 个、间距 20"→ 确认卡显示模式=feature/方向/4 实例/20mm → 执行 → PatternFeature 特征保留、实例证据>0；
+  - 几何体模式：创建长方体 →"把这个实体沿 +Y 阵列 3 个、间距 80"→ 模式=geometry → 执行 → 部件实体数 1→4（源保留）；
+  - 方向歧义（"随便哪个方向"）→ 询问而非猜测；失效引用拒绝；取消无几何变化；失败回滚。
+
+## 2026-10-23 · Phase 9.7：通用目标重定位 + Phase 9.8 双向原生矩形阵列（离线验证通过；已部署；实机验收由用户确认通过）
+
+- **需求**：①新对话清空 `LastCreatedBodyRef`/`LastCreatedFeatureRef` 后，助手必须能从当前工作部件、真实特征树和几何重新定位已有目标（通用特征识别，不限倒角工具、不要求常规手选）；②"X+ 数量 4 间距 15，Y+ 数量 3 间距 15"必须一次原生矩形阵列创建 4×3=12 位置（禁止两次嵌套、禁止把 PatternFeature 当第二方向源）。
+- **API 核验**（NXOpen.xml 直读）：`GeometricUtilities.RectangularPattern`="specification along two linear axes"（NX7.5+），含 `YDirection`/"any vector not parallel to the x axis"、`YSpacing`、`UseYDirectionToggle`；`PatternDefinition.SeedOnlyToggle` 语义确认。**修正一处核实错误**：孔特征托管类名是 `NXOpen.Features.Hole`（"HoleFeature" 是 Builder 工厂名，非特征类）。双向经 NX2512 程序集编译二次确认。
+- **实现**：
+  - Core/EdgeTargetResolution.cs：新增 `InventoryEntry` + `ResolveBodyFromInventory`（单实体直用/多实体唯一标准长方体自动解析/多长方体或无长方体拒绝）与 `ResolveFeatureFromInventory`（按托管类型定位，多行按唯一显示名匹配，歧义拒绝）。
+  - NxContextReader/NxContextSnapshot：上下文快照新增 `FeatureTree` 清单（≤50 行：JournalIdentifier/托管类型/显示名，仅活性未抑制特征），模型可直接引用真实引用。
+  - EdgeFinishToolExecutor：空选区时无记忆引用 → 实体清单+长方体拓扑探测 → 通用决策；仅在无记忆引用时探测（避免重复读取）。
+  - LinearPatternTool.cs：参数新增可选 `direction2`/`count2`/`pitch2`（三者同提供或同缺省，第二轴禁平行）；schema/描述同步。
+  - LinearPatternToolExecutor：`ApplyLinearDefinition` 双向分支（`UseYDirectionToggle=true`+`YDirection`+`YSpacing`，一次 CommitFeature）；几何模式 expectedNewBodies=count×count2−seed；成功消息/details 双向字段。
+  - ChatSessionController：确认卡显示"双向：X+ 4 个 × Y+ 3 个，一次原生矩形阵列共 12 个实例"。
+- **测试**：新增 `GenericTargetRelocationTests` 11 项 + `LinearPatternToolTests` 双向 13 项。全量 **901 项 = 900 通过 / 0 失败 / 1 跳过**。Release 0 警告 0 错误。
+- **部署**：NX 未运行；build.ps1 成功；4 DLL SHA-256 一致——Core `20fd35a1…`（以本轮末次部署为准，见 9.8 下一条）、UI `ece58e18…`、NxHost `d070be42…`、Entry `de4088c1…`；**部署脚本复制了 startup 菜单文件，内容与此前字节相同（非"未复制"）**。
+
+## 2026-10-23 · Phase 9.7.1/9.8.1 实机问题修复：R1 选区优先目标解析 + R2 非法参数与重复调用抑制 + 标记清洗（离线验证通过；已部署；实机验收由用户确认通过）
+
+- **实机现象**：①新对话中"把这个实体 +X 阵列 4 个间距 15；+Y 阵列 3 个间距 15（双向必须一次创建）"，NX 显示已选 1 个实体、部件有 2 实体，执行器仍拒绝"当前工作部件有2个实体且没有明确目标"（`preconditions_changed`）；②模型向 create_linear_pattern 传入不受支持的 `target=CYLINDER(5)`；③失败后出现重复调用，且原始 `.invoke` 协议内容疑似泄漏到聊天文本。
+- **根因**：R1——LinearPatternToolExecutor **几何体模式从不读取 NX 选区**（无任何 SelectionManager 调用），只走"记忆引用→实体计数"，2 实体无记忆引用即拒绝，选区被完全忽略。R2——未知字段由 `RejectUnknownFields` 正确拒绝（schema 未放宽），但控制器对参数类失败无重提交防护；`ToolTagProtocol` 类本身为 internal，UI 无法直接做显示侧清洗。
+- **修复**：
+  - R1（LinearPatternToolExecutor）：几何体模式统一优先级——①当前选区恰一个有效 Body（含特征树节点唯一解析出的实体）→直接作种子，其他实体不否决；②混入选区/多实体选中/无可用 Body→结构化拒绝；③空选区→既有"记忆引用→单实体"路径。复用 `CollectSelectionObjects`/`FindLiveBodyByRef`，未建第二套架构。
+  - R2（ChatSessionController）：新增本轮 (tool, 参数 JSON) 去重闸门——`InvalidParameters` 失败后字节相同的重提交在解析前拒绝并要求修正参数；目标解析类失败不去重（允许前置条件变化后重试）。`_failedParameterCallsThisTurn` 每轮清空。
+  - 泄漏清洗（ToolTagProtocol 公开化 + `StripInvokeMarkup`；ChatSessionController.`SanitizeModelTextForDisplay`）：完整块剔除保留散文、未闭合块剥除标记、纯协议内容换简短提示；应用于 finalText 与两处错误卡。
+- **测试**：新增 `TargetResolutionRegressionTests` 13 项（选区决策不变量、target 拒绝、schema 不放宽、完整/未闭合/纯标记清洗、去重键语义、双向 4×3=12、平行拒绝、结构化消息无标记）。全量 **914 项 = 913 通过 / 0 失败 / 1 跳过**。Release 0 警告 0 错误。
+- **部署**：NX 未运行（ugraf 计数 0）；4 DLL SHA-256 与 Release 产物逐项一致——Core `20fd35a1e683124f…`、UI `ece58e1818d16afd…`、NxHost `d070be4217329c52…`、Entry `de4088c153ea2e11…`。**部署脚本复制了 startup 菜单文件（内容与此前相同）；后续部署仅复制发生变化的 DLL，不复制/不更改 `nxai_assistant.men`。** Git 无操作。
+- **实机验收**：用户确认 R1/R2 测试通过（选区双向几何体阵列、唯一目标自动定位、歧义澄清、未知字段拒绝不重复调用）。
+
+## 2026-10-23 · Phase 9.9：环形阵列 create_circular_pattern（离线验证通过；已部署；实机验收待执行）
+
+- **需求**：独立环形阵列工具，feature/geometry 双模式与线性阵列语义一致；旋转轴必须显式（绝对轴/选中基准轴/选中直线边），不能把 Body 当轴、不能无声猜测；count=总实例数含源（2–100）；完整圆周 360° 默认、部分圆弧 total_angle_deg∈(0,360]；原生 Circular Pattern，不允许多次变换冒充。
+- **API 核验**（NXOpen.xml 直读 + **编译验证**，逐项修正假设）：`PatternDefinition.PatternEnum.Circular` → `CircularDefinition`（`CircularPattern`，"angular and radial directions"，NX7.5+）；`CircularPattern.RotationAxis` 是 **`NXOpen.Axis`** 智能对象（Types={NonAssociative,Other,PointAndDirection}，`Point`/`Direction` 可设）；`AngularSpacing`（`PatternSpacing` 基类 `NCopies`+`AngularPatternSpacing.PitchAngle/SpanAngle/UsePitchOption`，**UsePitchOptions 是枚举 {Angle,Distance} 不是 bool**）；`DatumAxis.Direction` 是**标量 Vector3d**、`DatumAxis.Origin` 是**标量 Point3d**（编译纠正了两版假设）。角度语义：完整圆周 pitch=360/count（首尾不重复）；部分圆弧设 SpanAngle（末实例落在结束角）。
+- **实现**（新 Core/CircularPatternTool.cs + NxHost/CircularPatternToolExecutor.cs）：
+  - 契约：mode（feature/geometry 必填）、axis（plus_z/plus_x/plus_y/datum_axis/line_edge 必填，**枚举值不含"随便轴"**）、count（2–100 含源）、total_angle_deg（可选）；**schema 不含任何对象引用字段**（R2 教训：种子与轴对象都由宿主解析，模型只描述意图）。
+  - 种子解析：完整复用 R1 选区优先级——选区恰一个有效 Body/Feature 直接作种子（同选区可同时携带轴对象，两个解析器各取各的类型）；空选区走记忆引用/唯一候选。
+  - 轴解析（宿主侧）：plus_x/y/z=过原点绝对轴（Directions.CreateDirection+Points.CreatePoint）；datum_axis=选区恰一个活 DatumAxis（或 DatumAxisFeature 唯一解析），读取其 Direction/Origin 标量重建自有智能对象；line_edge=选区恰一条活**直线**边（SolidEdgeType 校验，非直线拒绝），由两端点建轴。0/2 个轴对象均结构化拒绝，**Body 永不被当作轴**。
+  - 执行：PatternMethod=Simple+OutputOption=PatternFeature（特征模式）/IsAssociative=true+HideOriginal=false（几何模式）；`ApplyCircularDefinition`：PatternType=Circular、axis.Point/axis.Direction 赋值、NCopies=count、完整圆周→PitchAngle=360/count（UsePitchOption=Angle）、部分圆弧→SpanAngle=total；后置判定 `CircularPatternPostcondition` 纯函数（托管类型/存活/实例证据或 body 增长= count−1）；先 Destroy 后回滚（9.4.1 顺序）。
+  - 接线：CreateRegistry 注册（16→17 工具）、AutonomousToolAllowlist、ToolConfirmationFlow（新 CircularPattern kind+ForCircularPattern）、AssistantChatForm 确认卡（模式/种子/轴/数量/角度）、ChatSessionController 路由+确认分支+执行分发。
+- **测试**：新增 `CircularPatternToolTests` 25 项（解析/12 类拒绝含 target 与 axis_ref 引用字段、注册+allowlist、schema required 与无引用字段、后置判定 6 子条件）；9 个测试替身补 `ExecuteCreateCircularPattern`；工具总数断言 16→17（9 文件 13 处）+ 广告清单补 create_circular_pattern。全量 **939 项 = 938 通过 / 0 失败 / 1 跳过**。Release 构建通过。
+- **部署**：NX 未运行（ugraf=0）；4 DLL SHA-256 与 Release 产物一致——Core `2b51e31b…`、UI `f264c4ea…`、NxHost `3aa8dc4b…`、Entry `b23dbd89…`。**部署脚本复制了 startup 菜单（内容与此前相同）；后续部署仅复制变化 DLL。** Git 无操作。
+- **待实机验收（不得用离线结果代替）**：
+  1. 两实体部件：选中一个 → "把选中的实体绕 +Z 轴环形阵列 6 个" → 确认卡显示种子=选中实体/轴=+Z/6 实例/360° → 确认 → PatternGeometry 保留、部件 1→6 个实体、周向均布；
+  2. 部分圆弧："环形阵列 5 个，总角度 120°" → 首末实例夹角恰 120°；
+  3. 孔特征 + "绕基准轴环形阵列 8 个"（选中基准轴）→ axis=datum_axis 生效；
+  4. line_edge：选中直线边作轴；
+  5. 拒绝路径：未选轴要求 datum_axis → 结构化拒绝；选两条边 → 拒绝；count=1 → 拒绝；
+  6. 取消确认无几何变化；失败回滚完整。
+
+## 2026-10-23 · Phase 9.9.1：T1 实机失败修复——账本空引用 + 完整圆周角度归一化（离线验证通过；**部署被 NX 占用阻塞**）
+
+- **T1 实机现象**：选区（1 feature + 1 datum_axis）+ "几何体环形阵列 6 实例 360°" → `请求发生意外错误: Object reference not set to an instance of an object`；确认消息显示"相邻实例角距约72°"（正确应 60°）。
+- **根因定位**（日志 + 代码走读，阶段证据：`context.capture end`（21:01:43，选区=2）之后无任何 `execute.cir_pattern` 行——异常发生在执行器进入之前）：
+  - **NRE**：`ChatSessionController.DescribePendingOperation` 的 switch **缺 CircularPattern case**，落入 `_ => 布尔 {request.BooleanParameters!.Operation}` 通配——环形请求的 `BooleanParameters` 为 null → NullReferenceException（`ExecuteConfirmedTool` 的 `BeginAttempt` 处抛出，被 `RunRequestAsync` 外层 catch 包装为"请求发生意外错误"）。该 switch 自 Phase 2 起靠"新工具必须加 case"的约定维护，环形工具接线时漏改。
+  - **72°**：模型把完整圆周请求表述为 `total_angle_deg=360`，解析器接受（≤360 合法）并进入部分弧分支，确认卡用 `deg/(count−1)=360/5=72°`；执行器也会走 SpanAngle 路径。语义缺口：360 未归一化为完整圆周。
+- **修复**：
+  - `DescribePendingOperation` 增加 `CircularPattern` case（`环形阵列 {count}×{axis}`），并 internal 化以便测试；不再落入布尔通配。
+  - `CreateCircularPatternRequestParser`：`total_angle_deg` **≥360 归一化为 null**（完整圆周路径 PitchAngle=360/count）；描述文案同步（360 或省略=完整圆周、相邻角距=360/count；部分弧相邻角距=总角度/(count−1)、末实例落在结束角）。
+  - `CircularPatternToolExecutor`：EXCEPTION 日志增加 `EXCEPTION-DETAIL`（ex.ToString() 堆栈）与 `EXCEPTION-INNER`（仅写入诊断日志，不进聊天界面）；执行路径增加 stage 标记（builder 创建/种子加入/定义应用/commit/DoUpdate），T1 类故障可直接从日志定位首个失败阶段。
+- **测试**：新增 `CircularPatternLiveIncidentTests` 8 项（DescribePendingOperation 环形 case 不抛、5 种轴不落布尔通配、total_angle_deg=360 归一化→60°、省略角=60°、部分弧 120°/5=30° 保持、(0,360) 开区间部分弧边界、确认卡文案与执行器公式一致性两向）。全量 **947 项 = 946 通过 / 0 失败 / 1 跳过**。Release 构建通过。
+- **部署（补跑完成）**：首次 build.ps1 因 NX（ugraf.exe）运行中 Copy-Item IOException 阻塞；NX 退出后直接从本轮 Release 产物复制 4 个 DLL（未重建、源码未变），SHA-256 逐项一致——Core `b7e6987c…`、UI `2c38c4f9…`、NxHost `ab83daba…`、Entry `37cf6538…`；菜单文件未触碰（application 目录仅 4 DLL + 既有 selfcheck）。
+- **实机状态**：T1 修复**未验证**；T2–T6 未执行。部署完成后先重跑 T1（选区 feature+datum_axis、6 实例 360°：应出现确认卡且角距 60°、确认后执行成功），通过后再决定 T2–T6。
+
+## 2026-10-23 · Phase 9.9.2：T1 第二次失败修复——RotationAxis 空对象 NRE（真根因）+ 回滚后重复调用防护 + 参数标记泄漏（离线验证通过；已部署；T1 实机复验待执行）
+
+- **T1 第二次实机现象**（部署哈希 4/4 一致，确为新版运行）：确认卡正确显示"完整圆周360°（相邻实例角距60°）"→ 执行仍 `NullReferenceException`（已回滚）→ 约 40 秒后模型原样重试再次失败 → 聊天窗口出现原始工具协议内容。
+- **日志证据**（`%TEMP%\NXAI_Assistant_phase.log` 1280–1307 行）：两次尝试均走完 `seed resolved: 实体 BLOCK(1)`（**特征树节点→Body 解析正确**）、`axis: 基准轴 resolved (dir=(0,0,1) point=(0,0,-14.89))`（**DatumAxis 读取正确**）、`stage: apply circular definition` 后**立即** NRE——失败点锁定在 `ApplyCircularDefinition` 内。`EXCEPTION-DETAIL` 无堆栈行（NRE 堆栈未输出），但阶段标记已闭合定位。
+- **真根因**：`CircularPattern.RotationAxis` 在新 PatternDefinition 上 **getter 返回 null**（NX 未预建 Axis 智能对象）——旧代码 `axis.Point = …` 对 null 解引用。修复（NXOpen.xml 探测 + 编译验证）：**`workPart.Axes.CreateAxis(point, direction, WithinModeling)` 创建自有 Axis 智能对象**（重载 `CreateAxis(NXOpen.Point, NXOpen.Direction, UpdateOption)` 已核实），整对象赋给 `circular.RotationAxis`；属性名是 `BasePart.Axes`（非 AxisCollection 属性）。轴的 (point, direction) 来自既有解析器输出，类型端到端贯通。
+- **重复调用防护扩展**（ChatSessionController）：记录条件从仅 `InvalidParameters` 扩展为 **InvalidParameters ∪ (VerificationFailed|ExecutionFailed 且 RolledBack)**——已回滚部件复原、参数指纹相同（工具名+参数 JSON）的同一轮内重试在解析前拒绝（T1 40 秒重试即此类别）；未回滚失败/PreconditionsChanged 仍可同轮重试（NX 状态可能已变）；每轮清空，跨轮由用户操作后合法发起。
+- **参数标记泄漏修复**（ToolTagProtocol + ChatSessionController）：`ContainsToolMarker` 增测 **ParamOpen**（截断调用只残留参数标记、无 invoke 包裹时旧检查直接放行——本次泄漏路径）；`StripInvokeMarkup` 支持剥离孤立参数标记（含未闭合时丢弃后续）；`SanitizeModelTextForDisplay` 三分支重写（完整块→CleanText+残余再清洗；无块但有标记→剥参数标记；畸形→Strip+提示），普通尖括号散文不受影响。
+- **测试**：新增 `CircularPatternT1SecondIncidentTests` 8 项（T1 参数路径归一化 60°、回滚失败指纹语义、重复记录判定真值表、孤立参数标记检测/清洗/未闭合丢弃、普通尖括号保留、结构化拒绝无堆栈文本）。全量 **955 项 = 954 通过 / 0 失败 / 1 跳过**。Release 构建通过。
+- **部署**：NX 未运行；4 DLL SHA-256 一致——Core `c636944c…`、UI `c943c4d3…`、NxHost `3409e140…`、Entry `37cf6538…`；菜单未改动内容。Git 无操作。
+- **实机状态**：T1 **未在最新部署上复验**；T2–T6 未执行。重测 T1（同参数：1 feature + 1 datum_axis、6 实例 360°）预期：确认卡 60° → 执行成功（环形阵列创建、部件 1→6 实体）；若再失败，日志含 stage 标记 + EXCEPTION-DETAIL 可直接定位。
+
+## 2026-10-23 · Phase 9.9.3：T2 角度语义修正 + T4 直线特征轴解析（离线验证通过；已部署；T1–T4 复测待执行）
+
+- **实机状态**（部署 4/4 哈希一致，确为最新版）：T1 通过；T2 失败（5 实例 120°，确认卡 30° 但 NX 实测相邻 10°）；T3 通过；T4 失败（选区 Block + LINE(7)，报"特征LINE(7)解析出0个实体(预期1)"）。
+- **日志证据**：T2（1386 行）`copies=5 fullCircle=False readback: copies='5' usePitch=Angle`——SpanAngle=120 提交后 NX 实际相邻 10°，证明 **NX2512 该定义的 SpanAngle 不是"总跨度"**；T4（1441 行）`feature=LINE(7) type=AssociativeLine outputs=0 -> unresolvable`——LINE(7) 是 **AssociativeLine 特征**（无 Body 输出），被种子解析器误当实体候选。
+- **T2 修复**（CircularPatternToolExecutor）：统一为 **PitchAngle 每步** 配置（UsePitchOption=Angle）：完整圆周 pitch=360/count（T1 已证 60°）；部分弧 pitch=total/(count−1)（5 位置跨 120° → 0°/30°/60°/90°/120°，末实例落在结束角）。SpanAngle 不再设置；readback 增记 pitch/span 实际值。
+- **T4 修复**（CircularPatternToolExecutor + 契约/确认卡文案）：①新增 `IsAxisLikeFeature`（**仅** `NXOpen.Features.AssociativeLine`——NXOpen.xml 核实，未猜名）；两个种子解析器跳过轴类直线特征（不再计入种子候选、不产生"0 个实体"误诊）；②line_edge 轴解析扩展为接受**拓扑直线边 ∝ NXOpen.Line 对象 ∝ AssociativeLine 特征**（`Feature.GetEntities()→Line` 取真实 StartPoint/EndPoint），从线自身几何构建旋转轴；多条直线歧义拒绝、退化拒绝、无直线结构化拒绝——**无全局轴兜底、无静默替换**；③契约描述/schema/确认卡同步"直线（边或直线特征）"。
+- **测试**：新增 `CircularPatternT2T4Tests` 7 项（5×120°→30° 每步与位置序列、6×360°→60°、统一步进公式（归一化后）、line_edge+geometry 请求形状、契约含"直线特征"、歧义结构化拒绝、部分弧仍有效）。修正测试自身一处公式错误（归一化前 360 走了部分弧公式）。全量 **962 项 = 961 通过 / 0 失败 / 1 跳过**。Release 构建通过。
+- **部署**：NX 未运行；4 DLL SHA-256 一致——Core `e749ea95…`、UI `37e314b6…`、NxHost `4c56f4d1…`、Entry `cc70d7f3…`；菜单未改内容。Git 无操作。
+- **复测清单（T1–T4 依次，T2 必须实测位置角）**：T1 重跑（6×360°→60°，回归）；T2（5×120°：NX 中实测相邻位置 30°、0°/30°/60°/90°/120°，不能只看确认卡）；T3 回归；T4（选 Block+LINE(7)：确认卡轴="当前选中的直线（边或直线特征）"、执行成功、记录 LINE(7) 实际类型 AssociativeLine 与最终轴对象）。通过后再 T5/T6。环形阵列整体仍**不标实机通过**。
+
+## 2026-10-24 · Phase 9.9 收尾：圆形阵列实机验收确认（T1–T6 全部通过；仅文档同步，无代码改动）
+
+- **验收结论**：用户确认 `create_circular_pattern` 在 NX2512 实机 **T1–T6 全部通过**（T1 完整圆周 6×360°→60°、T2 部分圆弧 5×120°→30° 步距、T3 孔特征绕基准轴、T4 直线特征作轴、T5 拒绝路径、T6 取消与回滚）。本条为收尾记录，不修改任何业务代码、不重新部署、不重启 NX。
+- **证据链**：T1/T3 通过见 9.9.3 前实机记录与用户报告；T2/T4 修复后的实机通过、T5/T6 的具体执行日志与测量值**未单独记录**（以用户最终确认的通过结论为准，未补写细节）。Phase 9.9 验收清单定义见 2026-10-23 Phase 9.9 条目。
+- **功能范围（已有证据支持）**：feature/geometry 双模式（PatternFeatureBuilder/PatternGeometryBuilder + 原生 Circular 定义，PatternType=Circular）；旋转轴五类显式来源（plus_x/y/z 绝对轴、选中基准轴、选中直线——拓扑边或 AssociativeLine 特征），Body 永不作轴、歧义结构化拒绝；count=总实例含源（2–100）；完整圆周 PitchAngle=360/count、部分圆弧 PitchAngle=total/(count−1)（NX2512 SpanAngle 非"总跨度"——T2 实测确立）；种子解析复用选区优先（R1 同款）；先 Destroy 后回滚；回滚后同参数同轮重试防护。
+- **未单独核实（如实标注，未补写）**：T5/T6 逐项执行日志；T2 复测时的实例位置实测读数；本轮（收尾时点）未重新执行的自动化测试计数、Release 构建结果与部署哈希——最近一次有记录的值为 Phase 9.9.3（962 项=961 过/0 失败/1 跳；Core `e749ea95…`、UI `37e314b6…`、NxHost `4c56f4d1…`、Entry `cc70d7f3…`）。
+- **本轮操作**：仅更新本文档与 PROJECT_STATUS.md、RELEASE_CHECKLIST.md 的验收状态；无 Git 提交、无部署、无菜单改动。
+
+## 2026-10-24 · Phase 10：镜像 create_mirror 双模式实现（离线验证通过；**未部署**，待实机验收）
+
+- **需求**：几何体镜像（一个或多个明确选中的 Body）+ 特征镜像（一个或多个明确选中的 Feature）；镜像面支持基准面**和实体上的普通平面面**；对象与镜像面按角色分离解析。
+- **API 核验**（NXOpen.xml 探针 + **编译验证**，XML 不完整处由编译器裁决）：
+  - `Features.MirrorBodyBuilder`（几何体）：`MirrorBodyCollector`（ScCollector，配 `ScRuleFactory.CreateRuleBodyDumb(Body[])` 精确规则——XML 无此方法但编译验证存在，与既有 CreateRuleEdgeDumb 同族）、`Plane`（**SelectDatumPlane 选择器**——编译纠正"Plane 对象"假设）、`DeleteSourceBody`（NX2506+，保持 false=保留原体）、`FeatureOption=OneFeatureForAllBodies`（N 实体一个特征）。
+  - `Features.MirrorFeatureBuilder`（特征）：`FeatureSet`（逐项 Add）、`Plane`（**SelectISurface 选择器**——接受 DatumPlane 或平面面引用）、`PlaneOption=Existing`。
+  - `DatumPlane.Normal/Origin`（标量，用于诊断日志）；`MirrorBody`/`MirrorFeature` 提交类型；`BodyDumbRule` 构造器签名不适用故用工厂。
+- **实现**（新 Core/MirrorTool.cs + NxHost/MirrorToolExecutor.cs）：
+  - 契约：`mode`（geometry/feature 必填）+ `keep_original`（默认 true）；**schema 无任何对象引用字段**（种子与镜像面均由宿主从选区解析，R2 教训）。
+  - 选区角色分离：平面候选（DatumPlane/平面 Face/基准面特征唯一解析）与种子（geometry=Body/唯一拥有实体的特征；feature=非基准面特征）**分表解析**——镜像面永不计入种子；0 个种子/混入不兼容对象/多平面候选/非平面面/空选区均结构化拒绝；**无默认面、无绝对坐标面兜底**。
+  - 平面面真实几何读取：`AskFaceUvMinmax` 取 UV 中点 → `AskFaceProps` 取原点+单位法向（UFEvalsf 禁用——2026-10-16 崩溃记录），仅用于诊断日志；builder 直接接收 Face 引用（选择器原生支持，无中间对象、无生命周期清理负担）。
+  - 后置判定 `MirrorPostcondition` 纯函数：托管类（geometry=MirrorBody/Mirror、feature=MirrorFeature）、存活、geometry 模式特征须拥有实体且部件实体数恰增种子数；feature 模式不断言 body 增长（镜像孔在既有体内减切——数量可能不变）；失败先 Destroy 后回滚。
+- **接线**：注册表（17→18）、allowlist、ToolConfirmationFlow（Mirror kind+ForMirror）、AssistantChatForm 确认卡、ChatSessionController 路由+确认分支+执行分发+**DescribePendingOperation 补 Mirror case**（T1 教训：新工具必须补 case 防 NRE）；11 个测试替身补 ExecuteCreateMirror；工具计数断言 17→18（9 文件 13 处）+广告清单补 create_mirror。
+- **测试**：新增 `MirrorToolTests` 19 项（解析、6 类拒绝含 target/plane_ref/seeds 引用字段、注册+allowlist、schema 无引用字段、**DescribePendingOperation 双模式不落布尔通配**、后置判定 7 子条件含 feature 模式 body 增长豁免）。全量 **981 项 = 980 通过 / 0 失败 / 1 跳过**。Release 构建通过。
+- **未执行（按任务约束）**：部署（DLL 复制与哈希核对）、Git 提交/推送、`nxai_assistant.men` 改动（无）。
+- **实机验收方案（G1–G4/F1–F4/N1–N2，未执行）**：G1 单实体+基准面；G2 多实体+基准面；G3 单实体+普通平面面；G4 多实体+平面面；F1 单特征；F2 多特征；F3 依赖特征组；F4 特征+平面面；N1 歧义镜像面/无效种子拒绝；N2 取消/可控失败无残留。每例核对：确认卡对象数与镜像面、提交后特征类型（MirrorBody/MirrorFeature）、实体数变化、原体保留、撤销完整性。日志关键字 `execute.mirror`。
+
+## 2026-10-24 · Phase 10.1：自检几何体扩充（对象识别与诊断）+ 镜像部署（离线验证通过；已部署；镜像实机验收待执行）
+
+- **自检扩充**（NxGeometrySelfCheck.cs，复用既有 RunAll 隔离部件框架，未建第二套）：新增 `CheckObjectRecognition` 用例——临时部件创建块+固定基准面（`CreateFixedDatumPlane(Point3d, Matrix3x3)`，编译验证签名）后**只读分类**：Body/建模 Feature/DatumPlane/普通平面面四类识别；平面面经 `AskFaceUvMinmax`+`AskFaceProps` 输出可核验原点+单位法向（断言块顶面 Z=20、法向 +Z）；双平面候选计数（歧义检测输入）；新增 `ClassifyFeature`（特征树节点：DatumPlaneFeature→datum_plane、唯一拥有实体→body、其余→feature 行）。全程不动用户模型（隔离部件关闭不保存、恢复工作部件）。
+- **测试**：新增 `GeometrySelfCheckRecognitionTests` 7 项（用例注册、四类识别、平面几何断言、歧义候选、只读契约、验证读取路径对、报告 DTO）；修正两处断言（feature 行由 ClassifyFeature 实现后通过；UFEvalsf 禁令改为禁 API 调用而非注释提及）。全量 **988 项 = 987 通过 / 0 失败 / 1 跳过**。Release 构建通过。
+- **部署**（NX 关闭，ugraf=0；未跑完整脚本，未触碰 nxai_assistant.men）：定向复制 4 DLL 并逐一核对——Core `b177da85…`、UI `fd7905a8…`、NxHost `c476f501…`（自检扩充+镜像载体）、Entry `e57b425b…`；菜单 `319ee927…` 未变。
+- **镜像实机验收状态**：G1–G4/F1–F4/N1–N2 **全部未执行**（自检按钮的实时识别用例亦需 NX 内人工触发）。清单见 WORK_LOG Phase 10 条目；自检新用例结果将出现在自检报告中（caseE.recognition）。
+
+## 2026-10-24 · Phase 10.2：几何自检全覆盖（18 工具 13 用例；离线验证通过；已部署；NX2512 实机自检待执行）
+
+- **覆盖矩阵**（现有 5 用例 → 13 用例，注册表 18 工具全部经真实 Executor 调用，无 Mock 成功）：
+  - 既有：caseA/B 草图+拉伸/旋转圆环、caseC 四基本体、caseD 失效引用拒绝、caseE.recognition 对象识别。
+  - 新增：**caseF.cone**（圆锥+圆台双变体）；**caseG.booleans**（Unite/Subtract/Intersect 各自独立夹具对，实体数变化分别断言：并 −1/减 −1/交 −1）；**caseH.hole**（简单孔顶面 φ10×12）；**caseH.std_holes**（四标准孔族 M6 各独立夹具块，标准匹配由执行器 XML 表验证）；**caseI.edge_finishes**（R2/C2 各独立块 12 棱边，**真实 NX 选区**驱动，断言特征类型含 BLEND/CHAMFER）；**caseJ.linear_pattern**（geometry +X×4 实体+3 / feature +X×3 实体数不变）；**caseK.circular_pattern**（geometry +Z 6 实例实体+5 / feature 4 实例不变）；**caseL.mirror**（双体+基准面 / 单体+平面面 / 特征+基准面，实体数与特征类型断言）；**caseM.negative**（空选区镜像、双镜像面歧义、无效引用拉伸全拒且零几何）。
+- **关键技术事实（编译/反射验证）**：NXOpenUI SelectionManager 全局选区驱动成员为 **`RequestSelections(TaggedObject[])` / `ClearGlobalSelectionList()`**（自建 tools/SelectionProbe 反射探针枚举全部成员后确定；SetSelection/SelectTaggedObjects 各参数数猜测均被编译否决）。
+- **报告首页字段**（GeometrySelfCheckReport 扩展，带默认值向后兼容）：RegisteredToolCount(=18)/CoveredToolCount（按用例组计数：基本体 4+孔 5+边缘 2+阵列 2+镜像 1+布尔 1）/NegativePassed-Failed（caseD+caseM）/CleanupResult（cleanup/restore 失败即列名上报）。
+- **测试**：新增 `GeometrySelfCheckCoverageTests` 9 项（13 用例调度、注册表 18 工具数对齐、15 个 Executor 全被调用+三布尔+双模式枚举、负向三场景、真实选区驱动、隔离恢复四要素、报告五字段、覆盖计数分组）。全量 **997 项 = 996 通过 / 0 失败 / 1 跳过**。Release 构建通过。
+- **部署**（NX 关闭 ugraf=0；定向复制，未跑完整脚本）：4 DLL 哈希核对 MATCH——Core `78c426ea…`、UI `6ba70210…`、NxHost `481b8686…`、Entry `6ab1e578…`；菜单 `319ee927…` 未变。
+- **NX2512 实机自检：未执行**（不虚报）。待执行：启动 NX → 自检按钮 → 核查 13 用例逐项结果与首页覆盖数/负向计数/清理结果；失败项按日志（`selfcheck.*`/`execute.*`）定位修复后重跑受影响场景与全量回归。
+
+## 2026-10-24 · Phase 10.3：实机自检失败修复（9/5 → 待复验；离线验证通过；已部署）
+
+- **完整日志定位第五失败项**（phase.log 1891–1899 行）：caseL.mirror 三场景全败——G2 场景只选了基准面没选两个种子 Body（`REFUSED: no seed`）→ G3 场景空选区 → F1 场景上一轮 datum 残留选区（`2 plane candidates`）。**5 个失败 = std_holes / edge.edges / lin.geo / cir.geo / mirror**，与首页计数一致，无矛盾。
+- **根因表**：
+  - P1 `M6x1.0` 被拒（生产解析器过严）：真实 NX_Thread_Standard.xml 中 M6 全名即 `Size="M6 x 1.0" Pitch="1"`；NormalizeSize 只规范化纯数字。**修复**（StandardHoleTable.cs）：NormalizeSize 拆 `M{nom}x{pitch}` 形；Lookup 阶段核验螺距与标准表一致（`ExtractRequestedPitch` + `GetThreadedPitch` 读真实表 M6→Pitch=1），**错螺距（M6x1.25）仍拒绝**、非螺纹族带螺距拒绝、深度字段仍取同一条记录行（语义未动）。
+  - P2 边数 24（测试夹具）：面遍历共享边未去重。**修复**：`CollectBlockEdges` 按 JournalIdentifier 去重 + 逐边核验归属同一 body（`edge.GetBody()`）。
+  - P3/P4 阵列无目标（测试夹具）：19/20 实体歧义拒绝是**生产保护正确**，夹具未传种子。**修复**：caseJ/caseK 每次调用前 `SelectInNx(种子)`（几何体模式选 Body、特征模式选特征）+ finally `ClearNxSelection()`；未关闭任何生产歧义保护。
+  - P5 mirror（测试夹具）：caseL G2 场景选区补入两个种子 Body；每场景前后清理选区。
+- **测试**：新增 `StandardHoleSizeNormalizationTests` 16 项（归一化 9 例、螺距提取、M6x1.0 查表、错螺距拒绝、裸名不回归、不支持规格拒绝、非螺纹族螺距拒绝、深度字段同源）。全量 **1013 项 = 1012 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 无空白错误、无无关改动。
+- **部署**（NX 关闭 ugraf=0；定向复制；未跑完整脚本）：4 DLL 哈希 MATCH——Core `00fd33df…`、UI `debe8bc8…`、NxHost `b5a5760a…`、Entry `0f2c30ed…`；菜单 `319ee927…` 未变。
+- **实机复验：未执行（不虚报）**。重跑完整自检预期 13/13；重点复验 M6x1.0 与 M6 双输入、caseI 边数 12、caseJ/K 实体数增量、caseL 三场景。
+
+## 2026-10-24 · Phase 10.4：实机自检三失败项修复（离线验证通过；已部署；复验待执行）
+
+- **P1 caseI.edge.chamfer 边引用失效**（phase.log 2125-2128 行）：chamfer 收到 **24** 条边（fillet 的 12 条已失效旧边残留全局选区 + 自身 12 条），revalidate 对 `EDGE*1*3` MISS。根因=**测试夹具选区污染**（RequestSelections 前未清列表）。**修复**：`SelectInNx` 先 `ClearGlobalSelectionList()` 再 `RequestSelections`（仍走真实选区路径，生产 revalidate 保护未动）。
+- **P2 caseK.cir.feat.count 断言错误**（2185-2186 行实机证据）：PatternFeature **提交成功**（alive、instances=6）且 **bodies 31→34（+3）**——圆形特征阵列把块实体自身阵列出真实实体副本（4 实例含源 → 3 新实体），与"线性孔特征阵列实体数不变"语义不同。**修复**：caseK 断言改为 `beforeFeat+3`（依据实机证据，非放宽）；成功消息同步。
+- **P3 caseL.mirror RuntimeBinderException**（2201 行）：`SelectDatumPlane` 无 `Add`。**反射确认**（tools/SelectionProbe 读真实 NXOpen.dll）：两平面属性是**单选持有者**——`SelectDatumPlane.Value : DatumPlane`、`SelectISurface.Value : ISurface`，均 `set_Value` 可赋。**修复**（MirrorToolExecutor）：`WireMirrorPlane` 重写为两个类型化重载（SelectDatumPlane/SelectISurface），`Value` 直接赋 DatumPlane/Face 引用；geometry 重载保持单基准面结构门；删除 dynamic+Add 路径。
+- **测试**：新增 `MirrorPlaneWiringTests` 2 项（typed Value 赋值、无 dynamic/Add 残留、单基准面门）；`GeometrySelfCheckCoverageTests` 更新 2 项（选区先清后设正则锁定、caseK 断言依据实机证据）。全量 **1016 项 = 1015 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 干净。
+- **部署**（NX 关闭 ugraf=0；**仅复制变化的 2 个 DLL**）：NxHost `682533f9…`、Entry `48ce1f85…` MATCH；Core `00fd33df…`、UI `debe8bc8…` 未动仍一致；菜单 `319ee927…` 未变。
+- **实机复验：未执行（不虚报）**。重跑完整自检预期 13/13；重点：caseI 两特征（12 边、BLEND/CHAMFER、生成面）、caseK feature（提交+实体 +3+源保留）、caseL 三场景（Value 赋值路径）、自检结束选区已清/临时部件关闭/工作部件恢复。
+
+## 2026-10-24 · Phase 10.4 后续：caseL.mirror.geo.face 平面面路径修复（离线验证通过；已部署；复验待执行）
+
+- **实机失败**（13/1）：`caseL.mirror.geo.face` — `InvalidOperationException: geometry 模式镜像面必须恰好一个基准面`（已回滚）。
+- **调用链追踪**：夹具选 [body, planarFace] → 选区解析通过（planarFaces=1）→ `WireMirrorPlane(mbb.Plane,…)` —— **mbb.Plane 编译时类型是 SelectDatumPlane**，C# 重载按编译时绑定到 geometry 重载，其守卫 `datumPlanes.Count != 1 → throw` 在 datumPlanes=0 时触发。
+- **根因=生产执行器能力缺口**：工具契约明确镜像面支持"基准面**或**普通平面面"（任务需求也明确不得限于 Datum Plane），选区解析两 kind 都收，但 geometry 模式的 wire 步骤只实现了基准面路径——平面面被"恰好一个基准面"守卫拦截。
+- **API 核实**（tools/SelectionProbe 反射真实 NXOpen.dll）：`SelectDatumPlane.Value` 仅接受 DatumPlane（SetValue(DatumPlane…)）；**Face 实现了 ISurface** 但 MirrorBodyBuilder.Plane 属性类型固定为 SelectDatumPlane——平面面无法直传。**可行生产路径**：从平面面真实几何（ReadPlanarFaceDefinition：AskFaceUvMinmax UV 中点 + AskFaceProps 原点/单位法向）`CreateFixedDatumPlane(origin, matrix)`（matrix Z 轴=面法向，右手系）创建**临时基准面**，`Value = tempDatum`；**提交成功后 `UFModl.DeleteFeature(临时datum所属Feature)` 删除**（反射验证：DatumPlane 无 Destroy，UFModl.DeleteFeature(Tag[]) 存在）；失败路径由既有 Undo 回滚清理。
+- **实现**（MirrorToolExecutor）：geometry 重载签名改为 `(SelectDatumPlane, Part workPart, …, out DatumPlane? tempDatumToDestroy)`——基准面路径不变；平面面路径=转换+提交后删除；守卫消息改为"基准面或平面面"。调用量点在 commit+DoUpdate 成功后删除临时 datum 并记录日志（删除失败仅记录，不影响镜像特征）。
+- **测试**：`MirrorPlaneWiringTests` 更新/新增 3 项（守卫消息、临时 datum 转换+DeleteFeature、验证读取路径对、UFEvalsf 禁令）。全量 **1017 项 = 1016 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 干净。
+- **部署**（NX 关闭 ugraf=0；**仅 1 个 DLL**）：NxHost `f490b5f1…` MATCH；Core/UI/Entry 未动仍一致；菜单 `319ee927…` 未变。
+- **实机复验：未执行（不虚报）**。重点：caseL.geo.face（平面面镜像成功且自检报告无残留辅助 datum）、caseL 另两场景回归、自检结束清理恢复正常。
+
+## 2026-10-24 · Phase 10.4 闭环：临时 datum 删除时机修复（离线验证通过；**部署被 NX 占用阻塞**）
+
+- **实机失败**（phase.log 2866-2869 行，顺序铁证）：`stage: commit` → `temp datum feature deleted (post-commit)` → `stage: DoUpdate` → `NXException: 试图使用不活动的对象`。**根因**：镜像特征在 `DoUpdate` 之前未求值——在 Commit 与 DoUpdate 之间删除临时 datum 的 feature，使未更新的镜像特征失去平面引用。
+- **修复**（MirrorToolExecutor）：临时 datum 的删除从"Commit 后立即"移至 **DoUpdate + 后置验证成功之后**（`tempDatumToDestroy` 提升为方法级变量；删除失败仅记录不影响镜像成功）。**未吞 NXException**——DoUpdate 阶段的异常仍走原 EXCEPTION-DETAIL 记录与回滚。
+- **测试**：新增 `TempDatum_DeletedOnlyAfterDoUpdate` 顺序锁（"post-update" 删除标记必须在 DoUpdate 之后；旧 "post-commit" 删除点已消失）。全量 **1018 项 = 1017 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 干净。
+- **部署（NX 退出后补跑完成）**：定向复制 NxHost DLL（唯一变化文件），SHA-256 核对 MATCH——NxHost `e14fe5e8…`；Core `00fd33df…`、UI `debe8bc8…`、Entry `48ce1f85…` 未动仍一致；菜单 `319ee927…` 未变；application 目录仅 4 DLL + selfcheck 种子。
+- **实机复验：未执行（不虚报）**。部署后重跑完整自检，重点 caseL.geo.face（平面面镜像成功+无残留辅助 datum）与清理恢复。
+
+## 2026-10-24 · Phase 10.4 闭环 v2：临时 datum 删除级联毁镜像——改为保留并托管（离线验证通过；已部署；复验待执行）
+
+- **实机失败**（phase.log 3205-3208 行）：`bodies=39→40`（提交+更新均成功、postcondition pass）→ `temp datum feature deleted (post-update)` → **caseL.geo.face.count 计数 39 ≠ 40**——**DeleteFeature 级联删除了依赖该 datum 的 MirrorBody**（镜像的平面定义依赖 datum，删除 datum 连带移除镜像体；DoUpdate 前删是"不活动对象"，DoUpdate 后删是"实体丢失"——同一依赖的两种表现）。
+- **修复（MirrorToolExecutor）**：临时 datum **不再删除**，改为**保留并托管**——它就是镜像体平面定义的支撑对象（NX 自身部件中长期保留 datum 是惯例）：`Layer = 250`（专用图层，不占常规层）+ `RedisplayObject()` + `Blank()`（不可见），仅命名尝试被 NXObject.Name 只读拦下后移除。DeleteFeature 路径整体移除。失败提交仍由既有回滚清理。
+- **测试**：`MirrorPlaneWiringTests` 更新（DeleteFeature 断言消失、Layer=250/Blank/kept 断言加入）。全量 **1018 项 = 1017 通过 / 0 失败 / 1 跳过**。Release 构建通过；git diff --check 干净。
+- **部署**（NX 关闭 ugraf=0；仅 NxHost）：NxHost `697d1c6a…` MATCH；其余未动一致；菜单 `319ee927…` 未变。
+- **实机复验：未执行（不虚报）**。重点：caseL.geo.face（实体数 +1 保持、datum 在 250 层不可见）、caseL 另两场景、自检结束清理恢复。若用户要求物理删除辅助 datum，需改用"镜像后重建平面引用"的深路径（本轮未做，避免无证据猜测 API）。

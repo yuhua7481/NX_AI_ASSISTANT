@@ -147,7 +147,7 @@ public static class CreateRevolveTool
             "axis_mode": {
               "type": "string",
               "enum": ["selected_axis", "wcs_x", "wcs_y", "wcs_z"],
-              "description": "旋转轴。selected_axis：用户当前选中的单个直线型对象（基准轴/直边/草图直线，必须恰好一个）；wcs_x/wcs_y/wcs_z：工作部件绝对坐标轴。轴必须位于草图平面内，否则执行会被拒绝。"
+              "description": "旋转轴。selected_axis：用户当前选中的单个直线型对象（基准轴/直边/草图直线/关联直线特征，必须恰好一个）；wcs_x/wcs_y/wcs_z：工作部件绝对坐标轴。轴可以位于草图平面外（NX 支持），但不同轴产生的几何完全不同；轮廓到轴的距离决定旋转体尺度。"
             },
             "angle": {
               "type": "number",
@@ -162,6 +162,6 @@ public static class CreateRevolveTool
     public const string Description =
         "将一个已创建的草图绕指定轴旋转生成旋转体（Revolve 特征）。" +
         "需要 sketch_ref（create_sketch 返回的草图引用）、axis_mode（selected_axis=用户选中的单个直线对象，或 wcs_x/wcs_y/wcs_z 绝对坐标轴）与 angle（角度，0-360 度）。" +
-        "轴必须位于草图平面内；轮廓与轴相交可能产生无效几何，会被安全拒绝。" +
+        "轴允许位于草图平面外（NX 支持）；不同轴产生完全不同的几何，用户明确指定轴时不得擅自更换；轮廓与轴相交可能产生无效几何，由 NX 执行时判定并安全回滚。" +
         "仅当用户明确要求创建旋转体时调用；调用后需要用户在界面上确认才会执行。";
 }

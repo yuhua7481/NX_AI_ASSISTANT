@@ -146,6 +146,27 @@ public class ToolTagCompatAndChainTests
         public CreateBlockExecutionResult ExecuteCreateSphere(
             CreateSphereParameters p, string? path) => Record("create_sphere", path);
 
+        public CreateBlockExecutionResult ExecuteCreateHole(
+            CreateHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateStandardHole(
+            CreateStandardHoleParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateFillet(
+            CreateFilletParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateChamfer(
+            CreateChamferParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateLinearPattern(
+            CreateLinearPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateCircularPattern(
+            CreateCircularPatternParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
+        public CreateBlockExecutionResult ExecuteCreateMirror(
+            CreateMirrorParameters parameters, string? expectedWorkPartFullPath) =>
+            CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part");
         public CreateBlockExecutionResult ExecuteCreateSketch(
             CreateSketchParameters p, string? path)
         {
@@ -179,6 +200,15 @@ public class ToolTagCompatAndChainTests
             LastExpectedPaths.Add(path);
             return CreateBlockExecutionResult.Success(1, 1, 1, "ok", "part.prt");
         }
+
+        public ModelFeatureProbeResult? ProbeCommittedFeature(string toolName, string operationSummary) => null;
+
+        public ModelFeatureProbeResult? ProbeCommittedFeature(
+            string toolName, string operationSummary, IReadOnlySet<string>? preExistingFeatureIds,
+            BooleanOperationType? operationType = null) =>
+            ProbeCommittedFeature(toolName, operationSummary);
+
+        public IReadOnlySet<string>? ProbeFeatureSnapshot(string toolName, string? featureKind = null) => null;
     }
 
     private sealed class ConfirmationGate
@@ -252,7 +282,7 @@ public class ToolTagCompatAndChainTests
 
         // Real results in the chat log; no raw protocol anywhere.
         Assert.DoesNotContain(log.Messages, m => m.Text.Contains("invoke"));
-        Assert.Equal("圆柱已创建。", log.Messages[^1].Text);
+        Assert.Equal("圆柱已创建。", log.Messages[^2].Text);
         GC.KeepAlive(gate);
     }
 
@@ -337,7 +367,12 @@ public class ToolTagCompatAndChainTests
         await UntilAsync(() => executor.CallCount >= 2);
         await WaitForCompletedAsync(controller);
 
-        Assert.Equal(ChatSessionController.MaxToolExecutionsPerTurn, executor.CallCount);
+        // Rounds 1-2 each execute their single call; the final round refuses
+        // the looping request with a real message and the turn ends at the
+        // response cap — in a single-call-per-message turn the budget cap
+        // (MaxToolExecutionsPerTurn) is never the binding limit, the
+        // response-cap final-round refusal is.
+        Assert.Equal(2, executor.CallCount);
         Assert.Equal(ChatSessionController.MaxModelResponsesPerTurn, sender.RequestCount);
         Assert.Contains(log.Messages, m => m.Role == ChatRole.Error && m.Text.Contains("上限"));
         GC.KeepAlive(gate);

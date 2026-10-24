@@ -67,8 +67,10 @@ public sealed class NxContextReader
         }
 
         var selection = CaptureSelection(workPart, unavailable);
+        var featureTree = CaptureFeatureTree(workPart, unavailable);
         PhaseLog.Write("context.capture",
-            $"end: status=available selection={selection.Count} unavailable={unavailable.Count}");
+            $"end: status=available selection={selection.Count} features={featureTree.Count} " +
+            $"unavailable={unavailable.Count}");
 
         return new NxContextSnapshot
         {
@@ -81,8 +83,70 @@ public sealed class NxContextReader
             AbsoluteCoordinateSystem = null, // ACS read requires extra APIs; reported unavailable instead of guessed
             ActiveView = CaptureView(workPart, unavailable),
             Selection = selection,
+            FeatureTree = featureTree,
             Unavailable = unavailable,
         };
+    }
+
+    /// <summary>
+    /// Phase 9.7: walks the live feature tree (Part.Features — the same
+    /// verified read path FindHoleFeatureByRef uses) and builds a bounded
+    /// re-identification inventory. Only ALIVE, non-suppressed features are
+    /// listed; each row carries its stable JournalIdentifier ref and display
+    /// name so the model can name an existing target without remembered chat
+    /// state. Datums/sketches are entries too (their ref resolves under
+    /// DescribeObject rules); suppress nothing silently — an unread row
+    /// becomes an Unavailable reason. Bounded to prevent context blowup.
+    /// </summary>
+    private static IReadOnlyList<NxFeatureTreeItem> CaptureFeatureTree(
+        Part workPart, List<string> unavailable)
+    {
+        const int MaxRows = 50;
+        var rows = new List<NxFeatureTreeItem>();
+        try
+        {
+            foreach (object item in workPart.Features.ToArray())
+            {
+                if (item is not NXOpen.Features.Feature feature)
+                    continue;
+                string? type, name;
+                try
+                {
+                    if (IsDeadFeature(feature) || feature.Suppressed)
+                        continue;
+                    type = feature.GetType().Name;
+                    name = string.IsNullOrWhiteSpace(feature.Name) ? null : feature.Name;
+                }
+                catch (Exception ex)
+                {
+                    unavailable.Add($"特征树条目读取失败：{ex.Message}");
+                    continue;
+                }
+                try
+                {
+                    rows.Add(new NxFeatureTreeItem(
+                        feature.JournalIdentifier, type, name));
+                }
+                catch (Exception ex)
+                {
+                    unavailable.Add($"特征树引用读取失败：{ex.Message}");
+                    continue;
+                }
+                if (rows.Count >= MaxRows)
+                {
+                    unavailable.Add($"特征树超过 {MaxRows} 行，其余未列出。");
+                    break;
+                }
+            }
+            PhaseLog.Write("context.feature_tree",
+                $"rows={rows.Count} types=[" +
+                string.Join(",", rows.Select(r => r.RefType).Distinct().Take(8)) + "]");
+        }
+        catch (Exception ex)
+        {
+            unavailable.Add($"特征树读取失败：{ex.Message}");
+        }
+        return rows;
     }
 
     private static string SafeDisplayName(Part part)
@@ -143,19 +207,10 @@ public sealed class NxContextReader
             case Edge edge:
                 return DescribeEdge(edge);
             case NXOpen.Point point:
-                return new NxSelectionItem
-                {
-                    Kind = "point",
-                    Name = SafeJournalId(point),
-                    Point = new NxPointInfo(point.Coordinates.X, point.Coordinates.Y, point.Coordinates.Z),
-                };
+                return DescribePoint(point, source: "point");
             case NXOpen.Features.Feature feature:
-                return new NxSelectionItem
-                {
-                    Kind = "feature",
-                    Name = SafeName(feature),
-                    Feature = new NxFeatureInfo(feature.GetType().Name, feature.Name),
-                };
+                return DescribeFeature(feature);
+
             case DatumPlane:
                 return new NxSelectionItem { Kind = "datum_plane", Name = SafeName(obj) };
             case DatumAxis:
@@ -191,6 +246,132 @@ public sealed class NxContextReader
                     Subtype = obj.GetType().Name,
                     Name = SafeJournalId(obj),
                 };
+        }
+    }
+
+    /// <summary>
+    /// Maps a selected FEATURE node to its actual output body reference
+    /// (2026-10-21 live failure: the user selected a block and a cylinder;
+    /// the context only showed feature names, so the model invented refs
+    /// like "Cylinder"). Uses the verified Feature.GetBodies
+    /// ("bodies created by the feature"). The reference is offered ONLY when
+    /// the feature resolves to EXACTLY ONE alive, solid body; zero, multiple,
+    /// sheet or unreadable outputs are recorded as unresolvable — never
+    /// guessed, and the feature display name is never disguised as a body ref.
+    /// A PointFeature (the tree entry NX selects when the user clicks a
+    /// created point) is resolved to its NXOpen.Point through
+    /// Feature.GetEntities — the same entity collection the recorded journal
+    /// walks (pointFeature.FindObject("POINT 1")); the item is reported as a
+    /// POINT with its model coordinates, not as a bare feature name.
+    /// </summary>
+    private static NxSelectionItem DescribeFeature(NXOpen.Features.Feature feature)
+    {
+        // Point feature → point (before the generic feature branch): the
+        // hole tools accept a selected point as the hole center, so the
+        // context must carry its coordinates and source.
+        if (feature is NXOpen.Features.PointFeature pointFeature)
+        {
+            try
+            {
+                var pts = pointFeature.GetEntities()
+                    .OfType<NXOpen.Point>()
+                    .Where(p => !IsDeadFeature(p))
+                    .ToList();
+                PhaseLog.Write("context.point_feature",
+                    $"point feature={SafeJournalId(pointFeature)} points={pts.Count}");
+                if (pts.Count == 1)
+                {
+                    return DescribePoint(pts[0], source: "point_feature",
+                        featureName: SafeName(pointFeature));
+                }
+                // 0 or multiple points: fall through to the generic feature
+                // description with an explicit unresolvable marker — the
+                // model is told the truth rather than a guessed coordinate.
+                return new NxSelectionItem
+                {
+                    Kind = "feature",
+                    Subtype = "point_feature",
+                    Name = SafeName(pointFeature),
+                    Feature = new NxFeatureInfo(
+                        pointFeature.GetType().Name, SafeName(pointFeature),
+                        OutputBodyRef: null, OutputBodyCount: 0),
+                };
+            }
+            catch (Exception ex)
+            {
+                PhaseLog.Write("context.point_feature",
+                    $"FAILED: {ex.GetType().Name}: {ex.Message}");
+                // fall through to generic feature description
+            }
+        }
+        string? bodyRef = null;
+        int bodyCount = 0;
+        try
+        {
+            if (!IsDeadFeature(feature) && !feature.Suppressed)
+            {
+                var bodies = feature.GetBodies().Where(b => !IsDeadFeature(b)).ToArray();
+                bodyCount = bodies.Length;
+                if (bodyCount == 1 && !bodies[0].IsSheetBody)
+                    bodyRef = bodies[0].JournalIdentifier;
+            }
+        }
+        catch (Exception ex)
+        {
+            PhaseLog.Write("context.feature_bodies",
+                $"FAILED: {feature.GetType().Name}: {ex.Message}");
+            bodyCount = 0;
+        }
+        if (bodyRef == null)
+        {
+            PhaseLog.Write("context.feature_bodies",
+                $"feature={SafeJournalId(feature)} type={feature.GetType().Name} outputs={bodyCount} -> unresolvable");
+        }
+
+        return new NxSelectionItem
+        {
+            Kind = "feature",
+            Name = SafeName(feature),
+            Feature = new NxFeatureInfo(feature.GetType().Name, feature.Name, bodyRef, bodyCount),
+        };
+    }
+
+    /// <summary>
+    /// Builds the point selection item for a resolved NXOpen.Point with its
+    /// true model-space coordinates. <paramref name="source"/> states where
+    /// the point came from ("point" = standalone point object, "point_feature"
+    /// = a PointFeature resolved to its point, "sketch_point" = a sketch
+    /// point whose sketch frame has been applied). NXOpen.Point.Coordinates
+    /// is ALREADY in part/model coordinates for all three — sketch points
+    /// are held as model-space objects (the sketch's own 2D frame is an
+    /// authoring view; the stored point carries its transformed position),
+    /// so no extra transform is applied here; the sketch source is labeled
+    /// for the log and the model.
+    /// </summary>
+    private static NxSelectionItem DescribePoint(
+        NXOpen.Point point, string source, string? featureName = null)
+    {
+        var c = point.Coordinates;
+        return new NxSelectionItem
+        {
+            Kind = "point",
+            Subtype = source,
+            Name = featureName ?? SafeJournalId(point),
+            Point = new NxPointInfo(c.X, c.Y, c.Z),
+        };
+    }
+
+    private static bool IsDeadFeature(NXObject obj)
+    {
+        try
+        {
+            _ = obj.Tag;
+            _ = obj.IsOccurrence;
+            return false;
+        }
+        catch
+        {
+            return true;
         }
     }
 

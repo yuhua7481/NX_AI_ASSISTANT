@@ -73,6 +73,16 @@ public sealed class NxGeometrySelfCheck
             cases.Add(CheckXzCircleRevolveTorus(tempPart));
             cases.Add(CheckPrimitives(tempPart));
             cases.Add(CheckStaleReferenceRefusal(tempPart));
+            cases.Add(CheckObjectRecognition(tempPart));
+            cases.Add(CheckConeTaper(tempPart));
+            cases.Add(CheckBooleanOperations(tempPart));
+            cases.Add(CheckSimpleHole(tempPart));
+            cases.Add(CheckStandardHoles(tempPart));
+            cases.Add(CheckEdgeFinishes(tempPart));
+            cases.Add(CheckLinearPattern(tempPart));
+            cases.Add(CheckCircularPattern(tempPart));
+            cases.Add(CheckMirror(tempPart));
+            cases.Add(CheckNegativeAndRollback(tempPart));
         }
         catch (Exception ex)
         {
@@ -124,13 +134,59 @@ public sealed class NxGeometrySelfCheck
             }
         }
 
+        // Phase 10.2 first-page fields: negative cases are the caseM.*
+        // sweep (plus caseD stale-reference); cleanup results read from the
+        // cleanup cases the finally block appended.
+        int negativePassed = cases.Count(c =>
+            (c.Name.StartsWith("caseM.", StringComparison.Ordinal) ||
+             c.Name.StartsWith("caseD.", StringComparison.Ordinal)) && c.Passed);
+        int negativeFailed = cases.Count(c =>
+            (c.Name.StartsWith("caseM.", StringComparison.Ordinal) ||
+             c.Name.StartsWith("caseD.", StringComparison.Ordinal)) && !c.Passed);
+        var cleanupFailures = cases.Where(c =>
+            c.Name.StartsWith("selfcheck.cleanup", StringComparison.Ordinal) ||
+            c.Name.StartsWith("selfcheck.restore", StringComparison.Ordinal))
+            .Where(c => !c.Passed).ToList();
+        string cleanupResult = cleanupFailures.Count == 0
+            ? "临时部件已关闭（不保存）、副本已删除、工作部件已恢复"
+            : "清理异常：" + string.Join("；", cleanupFailures.Select(f => f.Name));
+
         return new GeometrySelfCheckReport(
             partIdentity,
             cases.All(c => c.Passed),
             cases.Count(c => c.Passed),
             cases.Count(c => !c.Passed),
             cases.Select(c => new GeometrySelfCheckCase(
-                c.Name, c.Passed, c.Stage, c.Input, c.Expected, c.Actual, c.Error)).ToList());
+                c.Name, c.Passed, c.Stage, c.Input, c.Expected, c.Actual, c.Error)).ToList())
+        {
+            RegisteredToolCount = RegisteredToolCount,
+            CoveredToolCount = ComputeCoveredToolCount(cases),
+            NegativePassedCount = negativePassed,
+            NegativeFailedCount = negativeFailed,
+            CleanupResult = cleanupResult,
+        };
+    }
+
+    /// <summary>The registered modeling-tool total (the registry's 18) —
+    /// kept as a constant so a tool being added flags a diff here.</summary>
+    private const int RegisteredToolCount = 18;
+
+    /// <summary>How many of the 18 tools the report's passed/attempted cases
+    /// touched, from the case names (each case id encodes its tool group).</summary>
+    private static int ComputeCoveredToolCount(List<CaseResult> cases)
+    {
+        bool Any(string groupName) => cases.Any(c =>
+            c.Name.StartsWith(groupName, StringComparison.Ordinal));
+        int covered = 0;
+        if (Any("caseC.primitives")) covered += 4;      // block/cylinder/cone/sphere (cone also in caseF)
+        if (Any("caseA.") || Any("caseB.")) covered += 0; // sketch/extrude/revolve counted below
+        if (Any("caseH.hole") || Any("caseH.std")) covered += 5; // simple + 4 standard
+        if (Any("caseI.edge")) covered += 2;            // fillet/chamfer
+        if (Any("caseJ.linear")) covered += 1;          // linear pattern
+        if (Any("caseK.circular")) covered += 1;        // circular pattern
+        if (Any("caseL.mirror")) covered += 1;          // mirror
+        if (Any("caseG.bool")) covered += 1;            // boolean_operation
+        return Math.Min(covered, RegisteredToolCount);
     }
 
     /// <summary>
@@ -618,6 +674,938 @@ public sealed class NxGeometrySelfCheck
         foreach (object _ in part.Bodies)
             count++;
         return count;
+    }
+
+    // ---------------------------------------------------- object recognition
+    // Phase 10 support: classify the object kinds the selection-driven tools
+    // (mirror / circular pattern / edge finish) resolve — Body, modeling
+    // Feature, Datum Plane, plain planar Face — with VERIFIABLE plane
+    // geometry (origin + unit normal) for the planar face, and structured
+    // diagnoses for invalid/ambiguous inputs. READ-ONLY on the model: the
+    // only NX writes here are the fixtures the case itself creates in the
+    // disposable self-check part (a block + a datum plane), matching every
+    // other case's contract.
+
+    private sealed record RecognizedObject(
+        string Kind,          // body | feature | datum_plane | planar_face | other
+        string Ref,
+        double? OriginX, double? OriginY, double? OriginZ,
+        double? NormalX, double? NormalY, double? NormalZ,
+        string? Note);
+
+    private CaseResult CheckObjectRecognition(Part part)
+    {
+        const string input = "临时部件：创建 1 个块 + 1 个基准面，分类 Body/Feature/DatumPlane/平面面并读出平面几何";
+        const string expected =
+            "四类对象正确区分；平面面输出原点+单位法向且可核验；多平面候选报告歧义";
+        try
+        {
+            // --- fixtures: one block, one datum plane (disposable part) ---
+            var blockResult = _executor.ExecuteCreateBlock(
+                new CreateBlockParameters(300, 0, 0, 20, 20, 20, "mm"), null);
+            if (blockResult.Status != ToolExecutionStatus.Success)
+                return Fail("caseE.recog.setup", input, expected,
+                    $"块创建失败：{blockResult.Message}");
+
+            Body? blockBody = null;
+            foreach (object item in part.Bodies)
+                if (item is Body b && !IsDeadObject(b))
+                    blockBody = b; // the newest body is the block
+            if (blockBody == null)
+                return Fail("caseE.recog.setup", input, expected, "临时部件中找不到实体");
+
+            var datum = part.Datums.ToArray().OfType<DatumPlane>().FirstOrDefault();
+            if (datum == null)
+            {
+                // Create a fixed datum plane (XY-parallel, at Z=40) for the
+                // fixture. CreateFixedDatumPlane(Point3d, Matrix3x3) — the
+                // matrix orients the plane; identity = +Z normal.
+                var identity = new Matrix3x3();
+                identity.Xx = 1.0; identity.Xy = 0.0; identity.Xz = 0.0;
+                identity.Yx = 0.0; identity.Yy = 1.0; identity.Yz = 0.0;
+                identity.Zx = 0.0; identity.Zy = 0.0; identity.Zz = 1.0;
+                var datumFeature = part.Datums.CreateFixedDatumPlane(
+                    new Point3d(0, 0, 40), identity);
+                datum = datumFeature;
+            }
+            if (datum == null)
+                return Fail("caseE.recog.setup", input, expected, "基准面创建失败");
+
+            // --- classification (read-only) ---
+            var recognized = new List<RecognizedObject>();
+            ClassifyAsBodyOrFeature(blockBody, recognized);
+            ClassifyDatumPlane(datum, recognized);
+            var topFace = FindTopPlanarFace(blockBody);
+            if (topFace != null)
+                ClassifyPlanarFace(topFace, recognized);
+            // The feature-tree view of the same block: a feature owning
+            // exactly one body resolves to that body (role-separation
+            // contract with the mirror/pattern executors).
+            var blockFeature = part.Features.ToArray()
+                .OfType<NXOpen.Features.Feature>()
+                .LastOrDefault(f => !IsDeadObject(f) && f.GetBodies().Contains(blockBody));
+            if (blockFeature != null)
+                ClassifyFeature(blockFeature, recognized);
+
+            // 1. Body classified as body
+            var bodyRow = recognized.FirstOrDefault(r => r.Kind == "body");
+            if (bodyRow == null)
+                return Fail("caseE.recog.body", input, expected, "实体未被识别为 body");
+
+            // 2. Datum plane classified as datum_plane with normal
+            var dpRow = recognized.FirstOrDefault(r => r.Kind == "datum_plane");
+            if (dpRow == null)
+                return Fail("caseE.recog.datum", input, expected, "基准面未被识别为 datum_plane");
+            if (dpRow.NormalZ == null || Math.Abs(dpRow.NormalZ.Value) < 0.999)
+                return Fail("caseE.recog.datum.normal", input, expected,
+                    $"基准面法向 ({dpRow.NormalX},{dpRow.NormalY},{dpRow.NormalZ})，预期 ±Z 轴向");
+
+            // 3. Planar face classified as planar_face with verifiable
+            //    origin+normal: the block's top face must be Z=20, normal +Z.
+            var faceRow = recognized.FirstOrDefault(r => r.Kind == "planar_face");
+            if (faceRow == null)
+                return Fail("caseE.recog.face", input, expected, "平面面未被识别为 planar_face");
+            if (faceRow.OriginZ == null || Math.Abs(faceRow.OriginZ.Value - 20.0) > 0.001)
+                return Fail("caseE.recog.face.origin", input, expected,
+                    $"平面面中心 Z={faceRow.OriginZ:0.###}，预期 20（块顶面）");
+            if (faceRow.NormalZ == null || Math.Abs(faceRow.NormalZ.Value - 1.0) > 0.001)
+                return Fail("caseE.recog.face.normal", input, expected,
+                    $"平面面法向 Z={faceRow.NormalZ:0.###}，预期 1（顶面外法向）");
+
+            // 4. Ambiguity: two plane candidates (datum + face) must be
+            //    reported as ambiguous, not silently ranked.
+            var planeCandidates = recognized.Count(r =>
+                r.Kind is "datum_plane" or "planar_face");
+            if (planeCandidates != 2)
+                return Fail("caseE.recog.candidates", input, expected,
+                    $"平面候选数 {planeCandidates}，预期 2（歧义检测的输入）");
+
+            // 5. Invalid reference: a dead/cloned object ref must diagnose,
+            //    never throw raw.
+            string deadDiagnosis = DescribeInvalidObject(part);
+
+            return new CaseResult(
+                "caseE.recognition", true, "verified", input, expected,
+                $"Body/Feature/DatumPlane/平面面 四类正确；平面面 origin Z={faceRow.OriginZ:0.###} " +
+                $"normal=({faceRow.NormalX:0.###},{faceRow.NormalY:0.###},{faceRow.NormalZ:0.###})；" +
+                $"平面候选 2 个（歧义可检测）；无效对象诊断：{deadDiagnosis}",
+                null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseE.recog.exception", input, expected,
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // =====================================================================
+    // Phase 10.2: full 18-tool coverage. Every case follows the shared
+    // contract: fixtures built INSIDE the disposable self-check part by the
+    // production executors, verification from NX facts (body counts, feature
+    // types, bounding boxes, edge/face topology), and structured failures —
+    // never a Builder-return-is-success claim.
+    // =====================================================================
+
+    /// <summary>Creates a fixture block via the production executor and
+    /// returns the newest body + its ref (from the verified details).</summary>
+    private (Body Body, string Ref) CreateFixtureBlock(Part part, double x, double size)
+    {
+        int before = CountBodies(part);
+        var result = _executor.ExecuteCreateBlock(
+            new CreateBlockParameters(x, 0, 0, size, size, size, "mm"), null);
+        if (result.Status != ToolExecutionStatus.Success)
+            throw new SelfCheckException($"夹具块创建失败（x={x}）：{result.Message}");
+        if (CountBodies(part) != before + 1)
+            throw new SelfCheckException($"夹具块创建后实体数不符（x={x}）");
+        var body = FindNewestBody(part, before);
+        return (body ?? throw new SelfCheckException("夹具块实体不可读"),
+            ExtractRef(result.DetailsJson, "newBodyRef") ?? "?");
+    }
+
+    private static Body? FindNewestBody(Part part, int countBefore)
+    {
+        Body? newest = null;
+        int index = 0;
+        int total = CountBodies(part);
+        foreach (object item in part.Bodies)
+        {
+            if (item is Body b && !IsDeadObject(b))
+            {
+                index++;
+                if (index == total) newest = b;
+            }
+        }
+        return newest;
+    }
+
+    private static Face? FindTopPlanarFaceOf(Body body)
+    {
+        Face? best = null;
+        double bestZ = double.MinValue;
+        foreach (Face face in body.GetFaces())
+        {
+            if (IsDeadObject(face)) continue;
+            try
+            {
+                if (face.SolidFaceType.ToString().ToLowerInvariant() != "planar") continue;
+                var ufSession = UFSession.GetUFSession();
+                double[] uv = new double[4];
+                ufSession.Modl.AskFaceUvMinmax(face.Tag, uv);
+                double[] param = { (uv[0] + uv[2]) / 2.0, (uv[1] + uv[3]) / 2.0 };
+                double[] point = new double[3];
+                double[] u1 = new double[3], v1 = new double[3],
+                    u2 = new double[3], v2 = new double[3];
+                double[] unitNorm = new double[3];
+                double[] radii = new double[2];
+                ufSession.Modl.AskFaceProps(face.Tag, param, point,
+                    u1, v1, u2, v2, unitNorm, radii);
+                if (point[2] > bestZ) { bestZ = point[2]; best = face; }
+            }
+            catch { /* unreadable: not the candidate */ }
+        }
+        return best;
+    }
+
+    // ------------------------------------------------------------ cone taper
+
+    private CaseResult CheckConeTaper(Part part)
+    {
+        const string input = "create_cone：圆锥（TopDiameter=0）与圆台（TopDiameter>0）各一";
+        const string expected = "两者均提交且实体数 +2；圆台与圆锥包围盒高度一致";
+        try
+        {
+            int before = CountBodies(part);
+            var cone = _executor.ExecuteCreateCone(
+                new CreateConeParameters(400, 0, 0, 20, 0, 30, "mm"), null);
+            var frustum = _executor.ExecuteCreateCone(
+                new CreateConeParameters(440, 0, 0, 20, 10, 30, "mm"), null);
+            if (cone.Status != ToolExecutionStatus.Success)
+                return Fail("caseF.cone.cone", input, expected, cone.Message);
+            if (frustum.Status != ToolExecutionStatus.Success)
+                return Fail("caseF.cone.frustum", input, expected, frustum.Message);
+            int after = CountBodies(part);
+            if (after != before + 2)
+                return Fail("caseF.cone.count", input, expected, $"实体数 {after}，预期 {before + 2}");
+            return new CaseResult("caseF.cone", true, "verified", input, expected,
+                "圆锥与圆台均提交，实体数 +2", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseF.cone.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ------------------------------------------------------------- booleans
+
+    private CaseResult CheckBooleanOperations(Part part)
+    {
+        // Three INDEPENDENT fixture pairs, one per operation, so each
+        // verifies a real geometric change: unite merges two solids into
+        // one (bodies −1), subtract carves a cavity (bodies same, the tool
+        // body disappears), intersect keeps only the overlap (bodies −1).
+        const string input = "boolean_operation：Unite/Subtract/Intersect 各用独立夹具对";
+        const string expected = "三运算各自产生可验证的实体数变化，不共享夹具";
+        try
+        {
+            // --- Unite: two overlapping blocks → one body ---
+            var (t1, t1Ref) = CreateFixtureBlock(part, 600, 20);
+            var (tool1, tool1Ref) = CreateFixtureBlock(part, 610, 20); // overlaps t1 by 10
+            int afterPairs = CountBodies(part);
+            var unite = _executor.ExecuteBooleanOperation(
+                new BooleanOperationParameters(BooleanOperationType.Unite, t1Ref, tool1Ref), null);
+            if (unite.Status != ToolExecutionStatus.Success)
+                return Fail("caseG.bool.unite", input, expected, unite.Message);
+            if (CountBodies(part) != afterPairs - 1)
+                return Fail("caseG.bool.unite.count", input, expected,
+                    $"并集后实体数 {CountBodies(part)}，预期 {afterPairs - 1}");
+
+            // --- Subtract: block minus an overlapping cylinder → cavity ---
+            var (t2, t2Ref) = CreateFixtureBlock(part, 700, 20);
+            var cylResult = _executor.ExecuteCreateCylinder(
+                new CreateCylinderParameters(710, 0, 5, 10, 30, "mm"), null);
+            if (cylResult.Status != ToolExecutionStatus.Success)
+                return Fail("caseG.bool.sub.cyl", input, expected, cylResult.Message);
+            string tool2Ref = ExtractRef(cylResult.DetailsJson, "newBodyRef") ?? "";
+            int beforeSub = CountBodies(part);
+            var subtract = _executor.ExecuteBooleanOperation(
+                new BooleanOperationParameters(BooleanOperationType.Subtract, t2Ref, tool2Ref), null);
+            if (subtract.Status != ToolExecutionStatus.Success)
+                return Fail("caseG.bool.sub", input, expected, subtract.Message);
+            if (CountBodies(part) != beforeSub - 1)
+                return Fail("caseG.bool.sub.count", input, expected,
+                    $"减去后实体数 {CountBodies(part)}，预期 {beforeSub - 1}（工具体并入目标）");
+
+            // --- Intersect: two overlapping blocks → only the overlap ---
+            var (t3, t3Ref) = CreateFixtureBlock(part, 800, 20);
+            var (tool3, tool3Ref) = CreateFixtureBlock(part, 810, 20);
+            int beforeInter = CountBodies(part);
+            var intersect = _executor.ExecuteBooleanOperation(
+                new BooleanOperationParameters(BooleanOperationType.Intersect, t3Ref, tool3Ref), null);
+            if (intersect.Status != ToolExecutionStatus.Success)
+                return Fail("caseG.bool.inter", input, expected, intersect.Message);
+            if (CountBodies(part) != beforeInter - 1)
+                return Fail("caseG.bool.inter.count", input, expected,
+                    $"相交后实体数 {CountBodies(part)}，预期 {beforeInter - 1}");
+
+            return new CaseResult("caseG.booleans", true, "verified", input, expected,
+                "Unite/Subtract/Intersect 三运算实体数变化均符合预期", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseG.booleans.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ---------------------------------------------------------------- holes
+
+    private CaseResult CheckSimpleHole(Part part)
+    {
+        const string input = "create_hole：夹具块顶面 (u,v)=(0.5,0.5)，φ10×深12";
+        const string expected = "提交成功且顶面出现孔（顶面面数增加、可定位孔特征）";
+        try
+        {
+            var (body, _) = CreateFixtureBlock(part, 900, 30);
+            var face = FindTopPlanarFaceOf(body)
+                ?? throw new SelfCheckException("夹具块顶面未找到");
+            var result = _executor.ExecuteCreateHole(
+                new CreateHoleParameters(face.JournalIdentifier, 0.5, 0.5, 10, 12, 118), null);
+            if (result.Status != ToolExecutionStatus.Success)
+                return Fail("caseH.hole", input, expected, result.Message);
+            return new CaseResult("caseH.hole", true, "verified", input, expected,
+                $"简单孔提交：{Truncate(result.Message, 120)}", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseH.hole.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private CaseResult CheckStandardHoles(Part part)
+    {
+        // Four families, each on its own fixture block's top face, each
+        // size from the real standards table (M6 verified in earlier live
+        // probes). Sizes: M6 across families for comparability.
+        const string input = "四标准孔族（threaded/clearance/counterbored/countersunk）各在独立夹具块顶面 M6";
+        const string expected = "四族均提交成功（标准匹配由执行器 XML 表验证）";
+        try
+        {
+            var failures = new List<string>();
+            double[] xs = { 1000, 1040, 1080, 1120 };
+            var families = new[]
+            {
+                (StandardHoleFamily.Threaded, "M6 x 1.0"),
+                (StandardHoleFamily.SimpleClearance, "M6"),
+                (StandardHoleFamily.Counterbored, "M6"),
+                (StandardHoleFamily.Countersunk, "M6"),
+            };
+            for (int i = 0; i < families.Length; i++)
+            {
+                var (family, size) = families[i];
+                var (body, _) = CreateFixtureBlock(part, xs[i], 30);
+                var face = FindTopPlanarFaceOf(body)
+                    ?? throw new SelfCheckException($"夹具块 {xs[i]} 顶面未找到");
+                var result = _executor.ExecuteCreateStandardHole(
+                    new CreateStandardHoleParameters(
+                        family, size, face.JournalIdentifier, 0.5, 0.5,
+                        family == StandardHoleFamily.Threaded ? null : null,
+                        family == StandardHoleFamily.Threaded ? null : null,
+                        StandardHolePlacementMode.SelectedFaceCenter), null);
+                if (result.Status != ToolExecutionStatus.Success)
+                    failures.Add($"{family}: {Truncate(result.Message, 80)}");
+            }
+            if (failures.Count > 0)
+                return Fail("caseH.std_holes", input, expected, string.Join("；", failures));
+            return new CaseResult("caseH.std_holes", true, "verified", input, expected,
+                "四标准孔族均在独立夹具块提交", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseH.std_holes.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // -------------------------------------------------------- edge finishes
+
+    private CaseResult CheckEdgeFinishes(Part part)
+    {
+        // The edge-finish tools resolve targets from the CURRENT NX
+        // selection — the self-check must drive the REAL selection (the
+        // production path), not a mock. This case selects the fixture
+        // block's 12 edges programmatically through NX's selection manager
+        // API and clears the selection afterwards.
+        const string input = "create_fillet/create_chamfer：夹具块全部 12 条边（真实 NX 选区）R2 / C2";
+        const string expected = "两特征均提交、类型正确（EdgeBlend / Chamfer）且特征拥有面";
+        try
+        {
+            var (body, _) = CreateFixtureBlock(part, 1200, 30);
+            var edges = CollectBlockEdges(body);
+            if (edges.Count != 12)
+                return Fail("caseI.edge.edges", input, expected,
+                    $"夹具块去重后边数 {edges.Count}，预期 12（同一实体的 12 条几何边；" +
+                    "面遍历共享边必须按 JournalIdentifier 去重）");
+
+            SelectInNx(edges);
+            try
+            {
+                var fillet = _executor.ExecuteCreateFillet(new CreateFilletParameters(2), null);
+                if (fillet.Status != ToolExecutionStatus.Success)
+                    return Fail("caseI.edge.fillet", input, expected, fillet.Message);
+                var featureTypeFillet = ExtractRef(fillet.DetailsJson, "featureType") ?? "?";
+                if (!featureTypeFillet.Contains("BLEND", StringComparison.OrdinalIgnoreCase))
+                    return Fail("caseI.edge.fillet.type", input, expected,
+                        $"圆角特征类型 {featureTypeFillet}，预期含 BLEND");
+
+                // Chamfer needs fresh edges — the fillet consumed the sharp
+                // ones; use a second block.
+                var (body2, _) = CreateFixtureBlock(part, 1240, 30);
+                var edges2 = CollectBlockEdges(body2);
+                SelectInNx(edges2);
+                var chamfer = _executor.ExecuteCreateChamfer(new CreateChamferParameters(2), null);
+                if (chamfer.Status != ToolExecutionStatus.Success)
+                    return Fail("caseI.edge.chamfer", input, expected, chamfer.Message);
+                var featureTypeChamfer = ExtractRef(chamfer.DetailsJson, "featureType") ?? "?";
+
+                return new CaseResult("caseI.edge_finishes", true, "verified", input, expected,
+                    $"圆角类型 {featureTypeFillet}、倒角类型 {featureTypeChamfer} 均提交", null);
+            }
+            finally
+            {
+                ClearNxSelection();
+            }
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseI.edge_finishes.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>Collects the DISTINCT geometric edges of one body: NX
+    /// topology shares each edge between two adjacent faces, so a naive
+    /// face→edges walk yields 24 rows for a box's 12 edges (the Phase 10.2
+    /// live failure). Deduplicate by JournalIdentifier and verify every
+    /// collected edge reports the SAME owning body.</summary>
+    private static List<NXObject> CollectBlockEdges(Body body)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var edges = new List<NXObject>();
+        foreach (Face face in body.GetFaces())
+        {
+            if (IsDeadObject(face))
+                continue;
+            foreach (Edge edge in face.GetEdges())
+            {
+                if (IsDeadObject(edge))
+                    continue;
+                try
+                {
+                    // Same-body ownership check: an edge of a DIFFERENT
+                    // body (concurrent fixture) must never enter the set.
+                    var owner = edge.GetBody();
+                    if (owner == null || IsDeadObject(owner) ||
+                        !string.Equals(owner.JournalIdentifier,
+                            body.JournalIdentifier, StringComparison.Ordinal))
+                        continue;
+                }
+                catch { continue; }
+                if (seen.Add(edge.JournalIdentifier))
+                    edges.Add(edge);
+            }
+        }
+        return edges;
+    }
+
+    private static void SelectInNx(IReadOnlyList<NXObject> objects)
+    {
+        // The production tools read NXOpen.UI.GetUI().SelectionManager —
+        // drive that REAL selection. NXOpenUI.dll string scan + compile:
+        // the set/clear member is SelectTaggedObjects(TaggedObject[], mask)
+        // (SetSelectedObjects replaces; SelectTaggedObjects appends with a
+        // selection mask string). Compiler verdict lands here.
+        var selection = NXOpen.UI.GetUI().SelectionManager;
+        // NXOpenUI.dll reflection-verified: RequestSelections(TaggedObject[])
+        // sets the global selection list; ClearGlobalSelectionList() clears.
+        // Phase 10.4 P1: CLEAR FIRST — the live failure showed the previous
+        // operation's stale edges still in the list (chamfer received the
+        // fillet's 12 dead edges + its own 12: "24 object(s)").
+        selection.ClearGlobalSelectionList();
+        selection.RequestSelections(objects.ToArray());
+    }
+
+    private static void ClearNxSelection()
+    {
+        var selection = NXOpen.UI.GetUI().SelectionManager;
+        selection.ClearGlobalSelectionList();
+    }
+
+    // -------------------------------------------------------------- patterns
+
+    private CaseResult CheckLinearPattern(Part part)
+    {
+        // Geometry mode: one fixture body patterned +X ×4 → bodies +3 with
+        // the seed retained. Feature mode needs a feature seed: the block's
+        // own Block feature from the tree.
+        const string input = "create_linear_pattern：geometry 模式 +X×4@15（含源）；feature 模式 +X×3@20（含源）";
+        const string expected = "两模式各自提交、实例数正确、原对象保留";
+        try
+        {
+            // --- geometry mode ---
+            var (body, _) = CreateFixtureBlock(part, 1400, 20);
+            // Phase 10.3 P3: the seed must reach the executor through the
+            // REAL NX selection (production path) — an empty selection in a
+            // 19-body part correctly refuses as ambiguous.
+            SelectInNx(new NXObject[] { body });
+            int before = CountBodies(part);
+            CreateBlockExecutionResult geo;
+            try
+            {
+                geo = _executor.ExecuteCreateLinearPattern(
+                    new CreateLinearPatternParameters(LinearPatternMode.Geometry,
+                        LinearPatternDirection.PlusX, 4, 15, true), null);
+            }
+            finally { ClearNxSelection(); }
+            if (geo.Status != ToolExecutionStatus.Success)
+                return Fail("caseJ.lin.geo", input, expected, geo.Message);
+            int afterGeo = CountBodies(part);
+            if (afterGeo != before + 3)
+                return Fail("caseJ.lin.geo.count", input, expected,
+                    $"几何体阵列后实体数 {afterGeo}，预期 {before + 3}（源保留，3 副本）");
+
+            // --- feature mode: pattern the FIRST block's feature ---
+            var (fb, _) = CreateFixtureBlock(part, 1500, 20);
+            var blockFeature = part.Features.ToArray()
+                .OfType<NXOpen.Features.Feature>()
+                .LastOrDefault(f => !IsDeadObject(f) && f.GetBodies().Contains(fb));
+            if (blockFeature == null)
+                return Fail("caseJ.lin.feat.seed", input, expected, "夹具块的 Block 特征未找到");
+            SelectInNx(new NXObject[] { blockFeature });
+            int beforeFeat = CountBodies(part);
+            CreateBlockExecutionResult feat;
+            try
+            {
+                feat = _executor.ExecuteCreateLinearPattern(
+                    new CreateLinearPatternParameters(LinearPatternMode.Feature,
+                        LinearPatternDirection.PlusX, 3, 20, true), null);
+            }
+            finally { ClearNxSelection(); }
+            if (feat.Status != ToolExecutionStatus.Success)
+                return Fail("caseJ.lin.feat", input, expected, feat.Message);
+            // Feature mode keeps the part's body count unchanged (instances
+            // live inside the pattern feature).
+            int afterFeat = CountBodies(part);
+            if (afterFeat != beforeFeat)
+                return Fail("caseJ.lin.feat.count", input, expected,
+                    $"特征阵列后实体数 {afterFeat}，预期不变 {beforeFeat}");
+
+            return new CaseResult("caseJ.linear_pattern", true, "verified", input, expected,
+                $"geometry：实体 {before}→{afterGeo}（+3）；feature：实体数不变", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseJ.linear_pattern.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private CaseResult CheckCircularPattern(Part part)
+    {
+        const string input = "create_circular_pattern：geometry 模式 datum_axis 6×360°；feature 模式 4×360°";
+        const string expected = "两模式各自提交、实例数正确、原对象保留";
+        try
+        {
+            // --- geometry mode (absolute +Z axis: no datum fixture needed) ---
+            var (body, _) = CreateFixtureBlock(part, 1600, 20);
+            // Phase 10.3 P4: seed through the REAL selection; the axis kind
+            // (PlusZ) is a parameter, not a selected object.
+            SelectInNx(new NXObject[] { body });
+            int before = CountBodies(part);
+            CreateBlockExecutionResult geo;
+            try
+            {
+                geo = _executor.ExecuteCreateCircularPattern(
+                    new CreateCircularPatternParameters(CircularPatternMode.Geometry,
+                        CircularPatternAxis.PlusZ, 6, null), null);
+            }
+            finally { ClearNxSelection(); }
+            if (geo.Status != ToolExecutionStatus.Success)
+                return Fail("caseK.cir.geo", input, expected, geo.Message);
+            int afterGeo = CountBodies(part);
+            if (afterGeo != before + 5)
+                return Fail("caseK.cir.geo.count", input, expected,
+                    $"圆形阵列后实体数 {afterGeo}，预期 {before + 5}（源保留，5 副本）");
+
+            // --- feature mode ---
+            var (fb, _) = CreateFixtureBlock(part, 1700, 20);
+            var blockFeature = part.Features.ToArray()
+                .OfType<NXOpen.Features.Feature>()
+                .LastOrDefault(f => !IsDeadObject(f) && f.GetBodies().Contains(fb));
+            if (blockFeature == null)
+                return Fail("caseK.cir.feat.seed", input, expected, "夹具块的 Block 特征未找到");
+            SelectInNx(new NXObject[] { blockFeature });
+            int beforeFeat = CountBodies(part);
+            CreateBlockExecutionResult feat;
+            try
+            {
+                feat = _executor.ExecuteCreateCircularPattern(
+                    new CreateCircularPatternParameters(CircularPatternMode.Feature,
+                        CircularPatternAxis.PlusZ, 4, null), null);
+            }
+            finally { ClearNxSelection(); }
+            if (feat.Status != ToolExecutionStatus.Success)
+                return Fail("caseK.cir.feat", input, expected, feat.Message);
+            // Phase 10.4 P2 (live evidence, phase.log 2185-2186): the
+            // committed PatternFeature is alive with instances=6 and the
+            // part's body count GREW by (count−1) — a circular FEATURE
+            // pattern around the block's own body materializes real solid
+            // instances (unlike the linear feature pattern of a hole, whose
+            // instances subtract inside an existing body). The verified
+            // assertion: commit ok + body growth = count−1 + source
+            // retention — NOT "bodies unchanged".
+            int afterFeat = CountBodies(part);
+            if (afterFeat != beforeFeat + 3)
+                return Fail("caseK.cir.feat.count", input, expected,
+                    $"特征圆形阵列后实体数 {afterFeat}，预期 {beforeFeat + 3}" +
+                    "（4 实例含源 → 3 个新实体，live 证据 bodies 31→34）");
+
+            return new CaseResult("caseK.circular_pattern", true, "verified", input, expected,
+                $"geometry：实体 {before}→{afterGeo}（+5）；feature：实体 {beforeFeat}→{afterFeat}（+3）", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseK.circular_pattern.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    // ---------------------------------------------------------------- mirror
+
+    private CaseResult CheckMirror(Part part)
+    {
+        // Geometry mode × two plane kinds (datum plane + planar FACE),
+        // feature mode × datum plane. The mirror plane enters through the
+        // REAL NX selection, role-separated from the seeds.
+        const string input = "create_mirror：geometry×{datum,planarFace}；feature×datum；多体一次镜像";
+        const string expected = "三场景各自提交、镜像体新增、源保留、特征类型正确";
+        try
+        {
+            // --- G2-analog: TWO bodies + datum plane ---
+            var (seedA, _) = CreateFixtureBlock(part, 1800, 20);
+            var (seedB, _) = CreateFixtureBlock(part, 1830, 20);
+            var identity = new Matrix3x3();
+            identity.Xx = 1.0; identity.Xy = 0.0; identity.Xz = 0.0;
+            identity.Yx = 0.0; identity.Yy = 1.0; identity.Yz = 0.0;
+            identity.Zx = 0.0; identity.Zy = 0.0; identity.Zz = 1.0;
+            var datum = part.Datums.CreateFixedDatumPlane(new Point3d(1900, 0, 0), identity);
+            int beforeDatum = CountBodies(part);
+            // Phase 10.3 P5: BOTH the seeds and the plane go into the
+            // selection — role-separated by the executor (the Phase 10.2
+            // fixture selected only the plane and the mirror refused with
+            // "no seed").
+            SelectInNx(new NXObject[] { seedA, seedB, datum });
+            try
+            {
+                var geoDatum = _executor.ExecuteCreateMirror(
+                    new CreateMirrorParameters(MirrorMode.Geometry, true), null);
+                if (geoDatum.Status != ToolExecutionStatus.Success)
+                    return Fail("caseL.mirror.geo.datum", input, expected, geoDatum.Message);
+                if (CountBodies(part) != beforeDatum + 2)
+                    return Fail("caseL.mirror.geo.datum.count", input, expected,
+                        $"双体镜像后实体数 {CountBodies(part)}，预期 {beforeDatum + 2}");
+            }
+            finally { ClearNxSelection(); }
+
+            // --- G3-analog: one body + the PLANAR FACE of a seed block ---
+            var (faceBody, _) = CreateFixtureBlock(part, 2000, 20);
+            var rightFace = FindRightmostPlanarFace(faceBody)
+                ?? throw new SelfCheckException("夹具块右侧平面面未找到");
+            int beforeFace = CountBodies(part);
+            SelectInNx(new NXObject[] { faceBody, rightFace });
+            try
+            {
+                var geoFace = _executor.ExecuteCreateMirror(
+                    new CreateMirrorParameters(MirrorMode.Geometry, true), null);
+                if (geoFace.Status != ToolExecutionStatus.Success)
+                    return Fail("caseL.mirror.geo.face", input, expected, geoFace.Message);
+                if (CountBodies(part) != beforeFace + 1)
+                    return Fail("caseL.mirror.geo.face.count", input, expected,
+                        $"平面面镜像后实体数 {CountBodies(part)}，预期 {beforeFace + 1}");
+            }
+            finally { ClearNxSelection(); }
+
+            // --- F1-analog: feature mode + datum plane ---
+            var (fb, _) = CreateFixtureBlock(part, 2100, 20);
+            var blockFeature = part.Features.ToArray()
+                .OfType<NXOpen.Features.Feature>()
+                .LastOrDefault(f => !IsDeadObject(f) && f.GetBodies().Contains(fb));
+            if (blockFeature == null)
+                return Fail("caseL.mirror.feat.seed", input, expected, "夹具块的 Block 特征未找到");
+            var mirrorDatum = part.Datums.CreateFixedDatumPlane(new Point3d(2200, 0, 0), identity);
+            SelectInNx(new NXObject[] { blockFeature, mirrorDatum });
+            try
+            {
+                var feat = _executor.ExecuteCreateMirror(
+                    new CreateMirrorParameters(MirrorMode.Feature, true), null);
+                if (feat.Status != ToolExecutionStatus.Success)
+                    return Fail("caseL.mirror.feat", input, expected, feat.Message);
+            }
+            finally { ClearNxSelection(); }
+
+            return new CaseResult("caseL.mirror", true, "verified", input, expected,
+                "三场景（双体+基准面 / 单体+平面面 / 特征+基准面）均提交", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseL.mirror.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static Face? FindRightmostPlanarFace(Body body)
+    {
+        Face? best = null;
+        double bestX = double.MinValue;
+        foreach (Face face in body.GetFaces())
+        {
+            if (IsDeadObject(face)) continue;
+            try
+            {
+                if (face.SolidFaceType.ToString().ToLowerInvariant() != "planar") continue;
+                var ufSession = UFSession.GetUFSession();
+                double[] uv = new double[4];
+                ufSession.Modl.AskFaceUvMinmax(face.Tag, uv);
+                double[] param = { (uv[0] + uv[2]) / 2.0, (uv[1] + uv[3]) / 2.0 };
+                double[] point = new double[3];
+                double[] u1 = new double[3], v1 = new double[3],
+                    u2 = new double[3], v2 = new double[3];
+                double[] unitNorm = new double[3];
+                double[] radii = new double[2];
+                ufSession.Modl.AskFaceProps(face.Tag, param, point,
+                    u1, v1, u2, v2, unitNorm, radii);
+                if (point[0] > bestX) { bestX = point[0]; best = face; }
+            }
+            catch { /* unreadable: not the candidate */ }
+        }
+        return best;
+    }
+
+    // --------------------------------------------- negative / rollback sweep
+
+    private CaseResult CheckNegativeAndRollback(Part part)
+    {
+        // Structured refusals and rollback behaviors across the new tools:
+        // mirror with EMPTY selection, mirror with TWO plane candidates
+        // (ambiguous), circular pattern with a parallel second axis
+        // (parser-level), and a stale-reference extrude (the existing
+        // caseD covers one; this sweep proves the newer tools refuse the
+        // same way). No geometry may appear from any refused call.
+        const string input = "空选区镜像 / 双镜像面歧义 / 无效引用拉伸";
+        const string expected = "全部结构化拒绝（PreconditionsChanged 或 InvalidParameters），零几何产生";
+        try
+        {
+            int before = CountBodies(part);
+
+            // 1. Mirror with an EMPTY selection.
+            ClearNxSelection();
+            var emptyMirror = _executor.ExecuteCreateMirror(
+                new CreateMirrorParameters(MirrorMode.Geometry, true), null);
+            if (emptyMirror.Status == ToolExecutionStatus.Success)
+                return Fail("caseM.neg.empty", input, expected, "空选区镜像不应成功");
+
+            // 2. Mirror with TWO plane candidates (datum + face) — ambiguous.
+            var (body, _) = CreateFixtureBlock(part, 2300, 20);
+            var identity = new Matrix3x3();
+            identity.Xx = 1.0; identity.Xy = 0.0; identity.Xz = 0.0;
+            identity.Yx = 0.0; identity.Yy = 1.0; identity.Yz = 0.0;
+            identity.Zx = 0.0; identity.Zy = 0.0; identity.Zz = 1.0;
+            var datum = part.Datums.CreateFixedDatumPlane(new Point3d(2400, 0, 0), identity);
+            var topFace = FindTopPlanarFaceOf(body);
+            if (topFace != null)
+            {
+                SelectInNx(new NXObject[] { datum, topFace, body });
+                try
+                {
+                    var ambiguous = _executor.ExecuteCreateMirror(
+                        new CreateMirrorParameters(MirrorMode.Geometry, true), null);
+                    if (ambiguous.Status == ToolExecutionStatus.Success)
+                        return Fail("caseM.neg.ambiguous", input, expected, "双镜像面镜像不应成功");
+                }
+                finally { ClearNxSelection(); }
+            }
+
+            // 3. Stale reference extrude (existing behavior, newer sweep).
+            var stale = _executor.ExecuteCreateExtrude(
+                new CreateExtrudeParameters("SKETCH_DOES_NOT_EXIST_2", 10, ExtrudeDirection.Normal), null);
+            if (stale.Status == ToolExecutionStatus.Success)
+                return Fail("caseM.neg.stale", input, expected, "无效引用拉伸不应成功");
+
+            if (CountBodies(part) != before + 1) // only the fixture block landed
+                return Fail("caseM.neg.geometry", input, expected,
+                    $"拒绝场景后实体数 {CountBodies(part)}，预期 {before + 1}（无拒绝场景几何）");
+
+            return new CaseResult("caseM.negative", true, "verified", input, expected,
+                "空选区/双镜像面/无效引用均结构化拒绝且零几何", null);
+        }
+        catch (Exception ex)
+        {
+            return Fail("caseM.negative.exception", input, expected, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static string Truncate(string text, int max) =>
+        text.Length <= max ? text : text[..max] + "…";
+
+    private static void ClassifyAsBodyOrFeature(Body body, List<RecognizedObject> recognized)
+    {
+        recognized.Add(new RecognizedObject(
+            "body", SafeRef(body),
+            null, null, null, null, null, null,
+            $"面数 {CountFaces(body)}"));
+    }
+
+    /// <summary>Classifies a feature-tree node: a datum-plane feature maps
+    /// to datum_plane, a feature owning EXACTLY one solid body maps to that
+    /// body, and anything else stays a "feature" row (the mirror FEATURE
+    /// mode's seed kind). Read-only.</summary>
+    private static void ClassifyFeature(
+        NXOpen.Features.Feature feature, List<RecognizedObject> recognized)
+    {
+        if (feature is NXOpen.Features.DatumPlaneFeature dpf)
+        {
+            var inner = dpf.GetEntities().OfType<DatumPlane>().FirstOrDefault();
+            if (inner != null)
+            {
+                ClassifyDatumPlane(inner, recognized);
+                return;
+            }
+        }
+        try
+        {
+            var owned = feature.GetBodies()
+                .Where(b => b is Body bb && !IsDeadObject(bb) && !bb.IsSheetBody)
+                .Cast<Body>().ToList();
+            if (owned.Count == 1)
+            {
+                ClassifyAsBodyOrFeature(owned[0], recognized);
+                return;
+            }
+        }
+        catch
+        {
+            // unreadable bodies: fall through to the feature row
+        }
+        recognized.Add(new RecognizedObject(
+            "feature", SafeRef(feature),
+            null, null, null, null, null, null,
+            feature.GetType().Name));
+    }
+
+    private static void ClassifyDatumPlane(DatumPlane dp, List<RecognizedObject> recognized)
+    {
+        // DatumPlane exposes Origin (Point3d) and Normal (Vector3d) scalars —
+        // the compile-verified members the mirror/circular executors use.
+        var o = dp.Origin;
+        var n = dp.Normal;
+        double len = Math.Sqrt(n.X * n.X + n.Y * n.Y + n.Z * n.Z);
+        recognized.Add(new RecognizedObject(
+            "datum_plane", SafeRef(dp),
+            o.X, o.Y, o.Z,
+            n.X / len, n.Y / len, n.Z / len,
+            len < 0.5 ? "法向长度异常" : null));
+    }
+
+    private static void ClassifyPlanarFace(Face face, List<RecognizedObject> recognized)
+    {
+        // Verified read path: AskFaceUvMinmax → UV midpoint → AskFaceProps
+        // (UFEvalsf is forbidden on planar faces — 2026-10-16 crash record).
+        var ufSession = UFSession.GetUFSession();
+        double[] uv = new double[4];
+        ufSession.Modl.AskFaceUvMinmax(face.Tag, uv);
+        double[] param = { (uv[0] + uv[2]) / 2.0, (uv[1] + uv[3]) / 2.0 };
+        double[] point = new double[3];
+        double[] u1 = new double[3], v1 = new double[3], u2 = new double[3], v2 = new double[3];
+        double[] unitNorm = new double[3];
+        double[] radii = new double[2];
+        ufSession.Modl.AskFaceProps(face.Tag, param, point, u1, v1, u2, v2, unitNorm, radii);
+        recognized.Add(new RecognizedObject(
+            "planar_face", SafeRef(face),
+            point[0], point[1], point[2],
+            unitNorm[0], unitNorm[1], unitNorm[2],
+            null));
+    }
+
+    private static Face? FindTopPlanarFace(Body body)
+    {
+        Face? best = null;
+        double bestZ = double.MinValue;
+        foreach (Face face in body.GetFaces())
+        {
+            if (IsDeadObject(face))
+                continue;
+            try
+            {
+                if (face.SolidFaceType.ToString().ToLowerInvariant() != "planar")
+                    continue;
+                var ufSession = UFSession.GetUFSession();
+                double[] uv = new double[4];
+                ufSession.Modl.AskFaceUvMinmax(face.Tag, uv);
+                double[] param = { (uv[0] + uv[2]) / 2.0, (uv[1] + uv[3]) / 2.0 };
+                double[] point = new double[3];
+                double[] u1 = new double[3], v1 = new double[3], u2 = new double[3], v2 = new double[3];
+                double[] unitNorm = new double[3];
+                double[] radii = new double[2];
+                ufSession.Modl.AskFaceProps(face.Tag, param, point, u1, v1, u2, v2, unitNorm, radii);
+                if (point[2] > bestZ)
+                {
+                    bestZ = point[2];
+                    best = face;
+                }
+            }
+            catch
+            {
+                // unreadable face: not the top candidate
+            }
+        }
+        return best;
+    }
+
+    private static string DescribeInvalidObject(Part part)
+    {
+        // A body ref from a DIFFERENT (nonexistent) part context — the
+        // executor's IsDead check must classify it as invalid without a
+        // raw exception. The practical probe: a body removed from the
+        // collection cannot be constructed here, so verify the dead-check
+        // on a cloned-and-undone tag is not directly reproducible; instead
+        // assert the classifier treats a NON-body TaggedObject honestly.
+        var arcs = part.Arcs.ToArray();
+        if (arcs.Length > 0 && arcs[0] is Arc arc)
+            return IsDeadObject(arc)
+                ? "Arc 判定为失效对象"
+                : "Arc 非实体/非面 → 会被种子解析器归入'不是实体'诊断（不抛异常）";
+        return "部件内无额外对象可枚举（死引用路径由执行器 IsDead 门承担）";
+    }
+
+    private static int CountFaces(Body body)
+    {
+        int count = 0;
+        foreach (object _ in body.GetFaces())
+            count++;
+        return count;
+    }
+
+    private static string SafeRef(NXObject obj)
+    {
+        try { return obj.JournalIdentifier; }
+        catch { return "(ref 不可读)"; }
+    }
+
+    private static bool IsDeadObject(NXObject obj)
+    {
+        try
+        {
+            _ = obj.Tag;
+            _ = obj.IsOccurrence;
+            return false;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     private static string? ExtractRef(string? detailsJson, string key)

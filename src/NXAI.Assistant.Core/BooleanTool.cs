@@ -137,11 +137,11 @@ public static class BooleanOperationTool
             },
             "target_body_ref": {
               "type": "string",
-              "description": "目标体引用（工具结果返回的 bodyRef）。unite/intersect 的结果归属目标体；subtract 从目标体减去工具体。"
+              "description": "目标体引用：必须是先前工具结果 newBodyRef/resultBodyRef 字段返回的真实引用（如 BLOCK(3)），不能用显示名称或编造编号。unite/intersect 的结果归属目标体；subtract 从目标体减去工具体。"
             },
             "tool_body_ref": {
               "type": "string",
-              "description": "工具体引用（工具结果返回的 bodyRef），必须与目标体不同。默认运算后工具体被消耗（合并入布尔特征）。"
+              "description": "工具体引用：必须是先前工具结果 newBodyRef/resultBodyRef 字段返回的真实引用（如 CYLINDER(4)），不能用显示名称或编造编号。必须与目标体不同。默认运算后工具体被消耗（合并入布尔特征）。"
             }
           }
         }
@@ -149,7 +149,8 @@ public static class BooleanOperationTool
 
     public const string Description =
         "对两个明确指定的实体执行布尔运算（unite 并集、subtract 差集、intersect 交集）。" +
-        "需要 operation、target_body_ref 与 tool_body_ref（均为工具结果返回的实体引用，不能编造；两者必须不同）。" +
+        "需要 operation、target_body_ref 与 tool_body_ref（均为先前工具结果中 newBodyRef/resultBodyRef 字段返回的真实实体引用，" +
+        "不能编造显示名称或自造编号如 block_1、Block、cylinder_1——不存在的引用会被拒绝且不执行任何操作；两者必须不同）。" +
         "运算后工具体默认被消耗；结果体归属目标体。仅当用户明确要求布尔运算且两个实体都能明确识别时调用；" +
         "调用后需要用户在界面上确认才会执行。";
 }

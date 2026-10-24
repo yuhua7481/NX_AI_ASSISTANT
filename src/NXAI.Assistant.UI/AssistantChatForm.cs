@@ -38,6 +38,14 @@ public sealed class AssistantChatForm : Form
     private readonly ModeToggleSwitch _modeSwitch;
     private ToolConfirmationRequest? _pendingConfirmation;
     private volatile bool _detached;
+
+    // Explicit lifecycle state (not inferred from close reasons at later
+    // call sites): the ✕ path is a user HIDE — session survives, in-flight
+    // request continues, controller stays attached. Only the real teardown
+    // path (NX session exit / host-initiated final close) is SessionExiting.
+    internal enum FormLifecycleState { Active, UserHidden, SessionExiting }
+    private FormLifecycleState _lifecycleState = FormLifecycleState.Active;
+
     private readonly ToolTip _toolTip = new();
     private readonly ContextMenuStrip _copyMenu = new();
 
@@ -58,15 +66,18 @@ public sealed class AssistantChatForm : Form
     private readonly Label _modeBarLabel;
     private readonly Func<NxContextSnapshot?>? _contextProvider;
     private readonly Func<GeometrySelfCheckReport>? _geometrySelfCheck;
+    private readonly IModelingExecutionLedger? _executionLedger;
 
     public AssistantChatForm(IActivePartReader partReader, INxToolExecutor? toolExecutor = null,
         Func<NxContextSnapshot?>? contextProvider = null,
-        Func<GeometrySelfCheckReport>? geometrySelfCheck = null)
+        Func<GeometrySelfCheckReport>? geometrySelfCheck = null,
+        IModelingExecutionLedger? executionLedger = null)
     {
         _partReader = partReader ?? throw new ArgumentNullException(nameof(partReader));
         _toolExecutor = toolExecutor;
         _contextProvider = contextProvider;
         _geometrySelfCheck = geometrySelfCheck;
+        _executionLedger = executionLedger;
         _modeManager = new ExecutionModeManager(new JsonFileExecutionModeStore());
 
         ChatSessionController BuildController() => new(
@@ -75,7 +86,8 @@ public sealed class AssistantChatForm : Form
             toolExecutor: toolExecutor,
             confirmationHandler: toolExecutor != null ? ShowToolConfirmationAsync : null,
             contextProvider: contextProvider,
-            modeManager: _modeManager);
+            modeManager: _modeManager,
+            executionLedger: executionLedger);
 
         _controller = BuildController();
         _controller.RequestStarted += (_, _) => SetRequestUiState(inFlight: true);
@@ -418,7 +430,49 @@ public sealed class AssistantChatForm : Form
         _chatLog.Add(ChatRole.Info, _controller.IsConfigurationReady
             ? $"已加载模型配置（{_controller.CurrentModelName}），发送消息即可开始对话。"
             : "尚未配置模型 API：点击左下角“模型设置”完成配置后再发送消息。");
+        // Surface lingering executions from earlier windows into this fresh
+        // chat so a torn-down turn cannot silently become "never happened".
+        // Runs HERE — after _messagesPanel exists and _chatLog.MessageAdded
+        // is subscribed — so each receipt becomes a visible message card
+        // through the normal event path.
+        SurfaceUnseenLedgerEntries();
         UpdateSessionStatus();
+    }
+
+    /// <summary>
+    /// Mirrors executions from earlier windows (shared ledger) into this
+    /// fresh chat log: recorded results as facts, attempting ones as explicit
+    /// unknown-state warnings the user must verify before further modeling.
+    /// Runs once per constructed window. Visibility rules live in the ledger
+    /// (PendingForDisplay): a Recorded fact is announced once and then stays
+    /// in the audit trail; an unacknowledged unknown repeats on every rebuild
+    /// until the user verifies it — repeating the display never acknowledges.
+    /// </summary>
+    private void SurfaceUnseenLedgerEntries()
+    {
+        if (_executionLedger == null)
+            return;
+        foreach (var entry in _executionLedger.PendingForDisplay())
+        {
+            if (entry.State == ModelingExecutionState.Recorded)
+            {
+                _chatLog.Add(ChatRole.Info,
+                    $"[跨窗体执行记录] {entry.ToolName}：{entry.OperationSummary}。" +
+                    $"状态 {entry.Status?.ToWireName()}：{entry.ResultMessage}" +
+                    (entry.RolledBack ? "（已回滚）" : "。"));
+            }
+            else
+            {
+                string resultNote = entry.ResultMessage == null
+                    ? "上一窗体在完成前被关闭，执行结果未回传"
+                    : $"执行器报告：{entry.ResultMessage}（无法保证部件未被修改）";
+                _chatLog.Add(ChatRole.Info,
+                    $"[结果未知] {entry.ToolName}：{entry.OperationSummary}。" +
+                    $"{resultNote}。" +
+                    "请先在 NX 中核实部件是否已包含该实体，再继续相关建模请求；" +
+                    "同名工具的重复请求将先弹出核实确认。");
+            }
+        }
     }
 
     /// <summary>Re-reads the active work part from the NX session (read-only).</summary>
@@ -618,6 +672,20 @@ public sealed class AssistantChatForm : Form
         // await and preserves the SynchronizationContext hop semantics.
         await Task.Yield();
 
+        // The form may have been hidden (✕) between scheduling and now. A
+        // confirmation owned by a hidden form can end up invisible behind
+        // NX's main window — the user would see nothing and modeling would
+        // appear to hang. The review is interactive by design: it does not
+        // run while the user has closed the UI. Returning null ends the turn
+        // cleanly (nothing executed, structured refusals reach the model and
+        // the ledger), and the user re-issues the request after reopening.
+        if (!Visible)
+        {
+            _chatLog.Add(ChatRole.Info,
+                "窗口已关闭，该建模确认未执行。重新打开对话窗口后请再次发送请求。");
+            return null;
+        }
+
         // Read the work part identity now, on the NX UI thread, so the card
         // shows exactly what the executor will later re-verify.
         string? workPartFullPath = null;
@@ -747,7 +815,7 @@ public sealed class AssistantChatForm : Form
                     _ => "绝对坐标 Z 轴",
                 };
                 operationText = "创建旋转体（Revolve）";
-                dimensionsText = $"角度：{FormatMm(r.AngleDeg)} 度\n轴：{axisText}（须在草图平面内）";
+                dimensionsText = $"角度：{FormatMm(r.AngleDeg)} 度\n轴：{axisText}";
                 originText = $"草图引用：{r.SketchRef}";
                 break;
             }
@@ -765,16 +833,136 @@ public sealed class AssistantChatForm : Form
                 originText = "运算后工具体被消耗（合并入布尔特征），结果归属目标体";
                 break;
             }
+            case ToolParametersKind.Hole:
+            {
+                var h = request.HoleParameters!;
+                string locText = h.LocationU == 0 && h.LocationV == 0
+                    ? "面中心"
+                    : $"面中心偏移 (u {FormatMm(h.LocationU)}, v {FormatMm(h.LocationV)}) 毫米";
+                operationText = "创建简单盲孔（Simple Hole）";
+                dimensionsText = $"直径：{FormatMm(h.Diameter)} 毫米\n深度：{FormatMm(h.Depth)} 毫米\n钻尖角：{FormatMm(h.TipAngleDeg)}°";
+                originText = $"孔位：{locText}；放置面：{h.PlacementFaceRef}";
+                break;
+            }
+            case ToolParametersKind.Fillet:
+            {
+                var f = request.FilletParameters!;
+                operationText = "边倒圆（Edge Blend，等半径圆角）";
+                dimensionsText = $"半径：{FormatMm(f.RadiusMm)} 毫米";
+                originText = "目标：用户当前选中的实体边（执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.Chamfer:
+            {
+                var c = request.ChamferParameters!;
+                operationText = "倒斜角（Chamfer，对称等距）";
+                dimensionsText = $"距离：{FormatMm(c.DistanceMm)} 毫米（两面对称）";
+                originText = "目标：用户当前选中的实体边（执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.LinearPattern:
+            {
+                var lp = request.LinearPatternParameters!;
+                string modeText = lp.Mode == LinearPatternMode.Feature
+                    ? "线性阵列特征（PatternFeature，本对话最近创建的特征）"
+                    : "线性阵列几何体（PatternGeometry，本对话最近创建的实体）";
+                string dirText = lp.Direction switch
+                {
+                    LinearPatternDirection.PlusX => "+X",
+                    LinearPatternDirection.MinusX => "-X",
+                    LinearPatternDirection.PlusY => "+Y",
+                    LinearPatternDirection.MinusY => "-Y",
+                    LinearPatternDirection.PlusZ => "+Z",
+                    _ => "-Z",
+                };
+                operationText = modeText;
+                dimensionsText = $"方向：{dirText}\n实例总数：{lp.Count}（含原始实例）\n间距：{FormatMm(lp.PitchMm)} 毫米";
+                originText = "目标：宿主自动解析（执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.CircularPattern:
+            {
+                var cp = request.CircularPatternParameters!;
+                string modeText = cp.Mode == CircularPatternMode.Feature
+                    ? "环形阵列特征（PatternFeature）"
+                    : "环形阵列几何体（PatternGeometry）";
+                string axisText = cp.Axis switch
+                {
+                    CircularPatternAxis.PlusX => "+X 轴（过原点）",
+                    CircularPatternAxis.PlusY => "+Y 轴（过原点）",
+                    CircularPatternAxis.PlusZ => "+Z 轴（过原点）",
+                    CircularPatternAxis.DatumAxis => "当前选中的基准轴",
+                    _ => "当前选中的直线（边或直线特征）",
+                };
+                string angleText = cp.TotalAngleDeg is { } deg
+                    ? $"总角度：{deg:0.###}°（最后一实例落在结束角上）"
+                    : "完整圆周 360°（实例均匀分布，首尾不重复）";
+                operationText = modeText;
+                dimensionsText = $"旋转轴：{axisText}\n实例总数：{cp.Count}（含原始实例）\n{angleText}";
+                originText = "目标：宿主自动解析（选区优先，执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.Mirror:
+            {
+                var mp = request.MirrorParameters!;
+                string modeText = mp.Mode == MirrorMode.Geometry
+                    ? "镜像几何体（MirrorBody，原实体保留）"
+                    : "镜像特征（MirrorFeature，历史与参数化保留）";
+                operationText = modeText;
+                dimensionsText = $"待镜像对象：由宿主从当前选区解析（可多个）\n镜像面：由宿主从当前选区解析（基准面或平面面）\n保留原对象：{(mp.KeepOriginal ? "是" : "否")}";
+                originText = "目标：宿主从当前选区解析（对象与镜像面按角色分离，执行时重新验证）";
+                break;
+            }
+            case ToolParametersKind.StandardHole:
+            {
+                var s = request.StandardHoleParameters!;
+                string familyText = s.Family switch
+                {
+                    StandardHoleFamily.Threaded => "螺纹孔（Threaded Hole，内螺纹）",
+                    StandardHoleFamily.SimpleClearance => "螺纹间隙孔（Simple Screw Clearance，无内螺纹）",
+                    StandardHoleFamily.Counterbored => "沉头孔（Counterbored，圆柱形平底台阶，ISO 4762）",
+                    _ => "埋头孔（Countersink，锥形斜面，ISO 10642）",
+                };
+                string locText = s.PlacementMode == StandardHolePlacementMode.SelectedPoint
+                    ? "选定点（孔心=该点的真实坐标，放置面由宿主从点所在实体平面解析）"
+                    : s.LocationU == 0 && s.LocationV == 0
+                        ? "面中心"
+                        : $"面中心偏移 (u {FormatMm(s.LocationU)}, v {FormatMm(s.LocationV)}) 毫米";
+                string depthText = s.Family switch
+                {
+                    StandardHoleFamily.Threaded when s.HoleDepthMm is { } hd && s.ThreadDepthMm is { } td =>
+                        $"孔深：{FormatMm(hd)} 毫米\n螺纹深：{FormatMm(td)} 毫米",
+                    StandardHoleFamily.Threaded => "孔深/螺纹深：标准表参考值",
+                    StandardHoleFamily.SimpleClearance when s.HoleDepthMm is { } sd =>
+                        $"孔深：{FormatMm(sd)} 毫米",
+                    _ => "全部尺寸：按 NX 标准表（" + s.Size + "）",
+                };
+                operationText = $"创建{familyText}";
+                dimensionsText = $"规格：{s.Size}\n{depthText}";
+                originText = $"孔位：{locText}；放置面：{s.PlacementFaceRef}";
+                break;
+            }
         }
 
+        // Unknown-outcome notice: when a previous execution of this exact tool
+        // reached the executor without a terminating verified result, the
+        // user must be TOLD so before acknowledging — hitting Next on an
+        // ordinary confirmation is NOT silent consent to have verified it.
+        var unknownPending = _executionLedger != null &&
+            _executionLedger.HasUnacknowledgedAttempt(request.ToolName);
+        string unknownText = unknownPending
+            ? "\n\n⚠ 该工具此前有一次执行结果未确认（上一窗体可能在完成前被关闭，或执行器无法保证结果）。\n" +
+              "请先在 NX 中核实部件当前是否已包含相关实体，确认后本次执行才会继续。\n" +
+              "（点击“是”表示你已完成核实并同意按原精确参数执行。）"
+            : "";
         var choice = MessageBox.Show(this,
             "模型请求执行以下建模操作：\n\n" +
             $"操作：{operationText}\n" +
             $"{dimensionsText}\n" +
             $"原点：{originText}\n" +
             $"目标部件：{workPartDisplay}\n\n" +
-            "确认后将在该部件中创建实体（可通过 NX 撤销）。",
-            "确认建模操作",
+            "确认后将在该部件中创建实体（可通过 NX 撤销）。" + unknownText,
+            unknownPending ? "存在未确认结果——请先核实部件" : "确认建模操作",
             MessageBoxButtons.YesNo, MessageBoxIcon.Question,
             MessageBoxDefaultButton.Button2);
 
@@ -818,6 +1006,11 @@ public sealed class AssistantChatForm : Form
         _chatLog.Clear();
         while (_messagesPanel.Controls.Count > 0)
             _messagesPanel.Controls[0].Dispose();
+
+        // Phase 9.5: a new conversation discards the remembered "most recent
+        // created body" — the next auto-target resolution must re-establish
+        // the target from the live model, never from the previous session.
+        _controller.ResetTargetResolution();
 
         _chatLog.Add(ChatRole.Info, "已开始新对话，之前的消息不会发送给模型。");
         UpdateSessionStatus();
@@ -1050,13 +1243,151 @@ public sealed class AssistantChatForm : Form
     {
         if (disposing)
         {
-            // Window is closing: no confirmed tool call may execute after this
+            // Final teardown (NX session exit, or the host closing the form
+            // explicitly): no confirmed tool call may execute after this
             // point, and any pending confirmation card resolves as aborted.
+            // The plain ✕ button path never reaches here — it hides instead
+            // (see OnFormClosing) so the session survives.
             _detached = true;
+            _cancelledByHiddenClose = false;
+            _lifecycleState = FormLifecycleState.SessionExiting;
             _controller.Dispose();
+
+            // Unsubscribe the log handler: a hidden-then-shown window never
+            // re-runs the constructor, so this could double-subscribe only
+            // through actual re-creation; unsubscribing here makes Dispose
+            // idempotent and keeps a disposed form from touching the log.
+            _chatLog.MessageAdded -= OnChatMessageAdded;
         }
         base.Dispose(disposing);
     }
+
+    // Session survival: the ✕ close button does NOT dispose the form. It
+    // hides it — the ChatLog, the controller and any in-flight request keep
+    // running on the NX UI thread, and re-opening (NxHostBoot.ShowChatWindow)
+    // shows the SAME form instance with the full history intact. Only the
+    // NX process exiting (Application exit) reaches the real Dispose path.
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        // The lifecycle state wins over close reasons: an explicit
+        // CloseForSessionShutdown already declared this a real teardown, so
+        // the close must go through regardless of the reason enum.
+        if (_lifecycleState == FormLifecycleState.SessionExiting)
+        {
+            base.OnFormClosing(e);
+            return;
+        }
+        // Session-exit / system shutdown / host-initiated closing: the form
+        // is really going away — accept the close; Dispose then detaches the
+        // controller. These are NOT the user's ✕ and must not be hidden.
+        if (e.CloseReason == CloseReason.ApplicationExitCall ||
+            e.CloseReason == CloseReason.TaskManagerClosing ||
+            e.CloseReason == CloseReason.WindowsShutDown ||
+            e.CloseReason == CloseReason.FormOwnerClosing ||
+            e.CloseReason == CloseReason.MdiFormClosing)
+        {
+            _lifecycleState = FormLifecycleState.SessionExiting;
+            base.OnFormClosing(e);
+            return;
+        }
+        if (e.CloseReason == CloseReason.UserClosing)
+        {
+            // The user's ✕: cancel the close, keep the session. Any in-flight
+            // request continues — its completion writes into the same ChatLog
+            // and becomes visible when the window is re-opened.
+            e.Cancel = true;
+            _cancelledByHiddenClose = true;
+            _lifecycleState = FormLifecycleState.UserHidden;
+            Hide();
+            return;
+        }
+        // Unknown close reason (programmatic Close with no owner context,
+        // parent teardown of unknown origin): treat as a user hide — the
+        // conservative choice. Nothing is lost; the controller keeps the
+        // session. A real teardown uses an explicit close reason above.
+        e.Cancel = true;
+        _cancelledByHiddenClose = true;
+        _lifecycleState = FormLifecycleState.UserHidden;
+        Hide();
+    }
+
+    /// <summary>Set while the form is hidden by the ✕ button; the controller's
+    /// in-flight request continues until it completes or the user cancels.</summary>
+    internal bool CancelledByHiddenClose => _cancelledByHiddenClose;
+    private bool _cancelledByHiddenClose;
+
+    /// <summary>The explicit lifecycle state: Active (shown), UserHidden
+    /// (✕ pressed, session alive) or SessionExiting (real teardown).</summary>
+    internal FormLifecycleState LifecycleState => _lifecycleState;
+
+    /// <summary>
+    /// Re-entering the Active state after a ✕-hide: called on Show before the
+    /// form becomes visible (OnVisibleChanged path uses the state directly).
+    /// </summary>
+    private void ReturnFromUserHide()
+    {
+        if (_lifecycleState == FormLifecycleState.UserHidden)
+        {
+            _cancelledByHiddenClose = false;
+            _lifecycleState = FormLifecycleState.Active;
+        }
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible)
+            ReturnFromUserHide();
+    }
+
+    /// <summary>
+    /// Real teardown initiated by the NX host (CLR unload / session exit):
+    /// marks the lifecycle SessionExiting FIRST so any close path taken from
+    /// here cannot be confused with a user hide, cancels the in-flight
+    /// request, then closes. Dispose (called through the normal close chain)
+    /// performs the actual controller detach.
+    ///
+    /// Thread-safety: this may be invoked from AppDomain.ProcessExit — a
+    /// thread that is NOT the NX UI thread. WinForms property/mode calls are
+    /// only made when this thread also owns the message pump; otherwise the
+    /// method reduces to cancelling the controller (token cancellation is
+    /// thread-safe) and marking the state. During process teardown the form
+    /// vanishes with the process anyway; the goal here is a clean, quiet
+    /// exit without cross-thread UI calls.
+    /// </summary>
+    public void CloseForSessionShutdown()
+    {
+        if (IsDisposed)
+            return;
+        _lifecycleState = FormLifecycleState.SessionExiting;
+        _cancelledByHiddenClose = false;
+        _controller.CancelActiveRequest();
+        if (InvokeRequired)
+        {
+            // Non-UI thread (ProcessExit): no WinForms calls from here. The
+            // controller is already cancelled and detached state is recorded;
+            // the process is exiting, so UI cleanup ends with it.
+            return;
+        }
+        // Let the posted continuation unwind once before closing, so the
+        // final RequestCompleted handling is not racing the handle teardown.
+        Application.DoEvents();
+        try
+        {
+            Close();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Already gone — nothing left to do.
+        }
+    }
+
+    // Session-survival observability for lifecycle tests
+    // (InternalsVisibleTo): the surviving chat log and whether the
+    // controller can still accept a new request after ✕-hide/re-show.
+    internal ChatLog SessionChatLog => _chatLog;
+    internal bool SessionControllerAlive => !_controller.IsDetached;
+
 
     /// <summary>
     /// 单条消息卡片。用户消息为右侧圆角气泡，助手回复为左侧通栏文本，

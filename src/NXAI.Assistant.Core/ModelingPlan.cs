@@ -121,7 +121,18 @@ public sealed record GeometrySelfCheckReport(
     bool AllPassed,
     int PassedCount,
     int FailedCount,
-    IReadOnlyList<GeometrySelfCheckCase> Cases);
+    IReadOnlyList<GeometrySelfCheckCase> Cases)
+{
+    /// <summary>Phase 10.2 first-page coverage fields: how many of the
+    /// registered modeling tools this report's cases actually exercised,
+    /// and the isolation outcome (temp-part close + user-part restore).
+    /// Optional with defaults so existing constructor call sites compile.</summary>
+    public int RegisteredToolCount { get; init; } = 18;
+    public int CoveredToolCount { get; init; } = 0;
+    public int NegativePassedCount { get; init; } = 0;
+    public int NegativeFailedCount { get; init; } = 0;
+    public string CleanupResult { get; init; } = "";
+}
 
 /// <summary>Aggregate result of a plan run: exactly what completed, what
 /// failed and at which stage — the partial-truth contract (never "all done"

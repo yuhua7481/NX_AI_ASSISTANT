@@ -60,6 +60,16 @@ public static class AutonomousToolAllowlist
         CreateExtrudeTool.Name,
         CreateRevolveTool.Name,
         BooleanOperationTool.Name,
+        CreateHoleTool.Name,
+        StandardHoleToolContract.ThreadedName,
+        StandardHoleToolContract.ClearanceName,
+        StandardHoleToolContract.CounterboredName,
+        StandardHoleToolContract.CountersunkName,
+        EdgeFinishToolContract.FilletName,
+        EdgeFinishToolContract.ChamferName,
+        LinearPatternToolContract.Name,
+        CircularPatternToolContract.Name,
+        MirrorToolContract.Name,
     };
 
     private static readonly HashSet<string> ToolSet =

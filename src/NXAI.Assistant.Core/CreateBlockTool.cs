@@ -84,6 +84,43 @@ public static class CreateBlockTool
         registry.Register(new ToolDefinition(
             BooleanOperationTool.Name, BooleanOperationTool.Description,
             BooleanOperationTool.ParametersJsonSchema));
+        registry.Register(new ToolDefinition(
+            CreateHoleTool.Name, CreateHoleTool.Description,
+            CreateHoleTool.ParametersJsonSchema));
+        // Standard-hole family tools (threaded / simple clearance /
+        // counterbored / countersunk) — sizes and dimensions from the NX
+        // modeling-standards tables.
+        var (thName, thDesc, thSchema, _) = StandardHoleToolContract.For(StandardHoleFamily.Threaded);
+        var (clName, clDesc, clSchema, _) = StandardHoleToolContract.For(StandardHoleFamily.SimpleClearance);
+        var (cbName, cbDesc, cbSchema, _) = StandardHoleToolContract.For(StandardHoleFamily.Counterbored);
+        var (csName, csDesc, csSchema, _) = StandardHoleToolContract.For(StandardHoleFamily.Countersunk);
+        registry.Register(new ToolDefinition(thName, thDesc, thSchema));
+        registry.Register(new ToolDefinition(clName, clDesc, clSchema));
+        registry.Register(new ToolDefinition(cbName, cbDesc, cbSchema));
+        registry.Register(new ToolDefinition(csName, csDesc, csSchema));
+        // Edge-finish tools (fillet / chamfer) — act on the CURRENT
+        // selection's edges; sizes from the model, targets from the host.
+        registry.Register(new ToolDefinition(
+            EdgeFinishToolContract.FilletName, EdgeFinishToolContract.FilletDescription,
+            EdgeFinishToolContract.FilletSchema));
+        registry.Register(new ToolDefinition(
+            EdgeFinishToolContract.ChamferName, EdgeFinishToolContract.ChamferDescription,
+            EdgeFinishToolContract.ChamferSchema));
+        // Linear pattern (feature + geometry modes).
+        registry.Register(new ToolDefinition(
+            LinearPatternToolContract.Name, LinearPatternToolContract.Description,
+            LinearPatternToolContract.ParametersJsonSchema));
+        // Circular pattern (feature + geometry modes) — native NX Circular
+        // PatternDefinition; the rotation axis comes from the current
+        // selection or an absolute axis, never a guess.
+        registry.Register(new ToolDefinition(
+            CircularPatternToolContract.Name, CircularPatternToolContract.Description,
+            CircularPatternToolContract.ParametersJsonSchema));
+        // Mirror (geometry + feature modes) — native NX mirror builders;
+        // seeds and mirror plane resolved host-side from the selection.
+        registry.Register(new ToolDefinition(
+            MirrorToolContract.Name, MirrorToolContract.Description,
+            MirrorToolContract.ParametersJsonSchema));
         return registry;
     }
 }

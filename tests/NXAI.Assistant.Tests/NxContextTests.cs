@@ -202,4 +202,78 @@ public class NxContextTests
         Assert.Contains("[other] OBJ(9)", text);
         Assert.DoesNotContain("法向", text);
     }
+
+    // ----------------------- feature output-body reference in the summary
+
+    [Fact]
+    public void Summary_FeatureWithSingleOutput_ShowsRealBodyRef()
+    {
+        var snapshot = new NxContextSnapshot
+        {
+            Status = "available",
+            WorkPartName = "p",
+            Selection = new[]
+            {
+                new NxSelectionItem
+                {
+                    Kind = "feature",
+                    Name = "Cylinder",
+                    Feature = new NxFeatureInfo("Cylinder", "Cylinder", "CYLINDER(2)", 1),
+                },
+                new NxSelectionItem
+                {
+                    Kind = "feature",
+                    Name = "Block",
+                    Feature = new NxFeatureInfo("Block", "Block", "BLOCK(1)", 1),
+                },
+            },
+        };
+        var text = snapshot.ToContextSummary();
+        // Real collected refs appear next to the feature names — never
+        // example strings, never sequential inventions.
+        Assert.Contains("[feature] Cylinder：Cylinder（Cylinder）；输出实体引用: CYLINDER(2)", text);
+        Assert.Contains("[feature] Block：Block（Block）；输出实体引用: BLOCK(1)", text);
+    }
+
+    [Fact]
+    public void Summary_FeatureWithMultipleOutputs_StatesUnresolvable()
+    {
+        var snapshot = new NxContextSnapshot
+        {
+            Status = "available",
+            WorkPartName = "p",
+            Selection = new[]
+            {
+                new NxSelectionItem
+                {
+                    Kind = "feature",
+                    Feature = new NxFeatureInfo("Mirror", "Mirror", null, 2),
+                },
+            },
+        };
+        var text = snapshot.ToContextSummary();
+        Assert.Contains("输出实体 2 个（无法唯一确定引用）", text);
+        Assert.DoesNotContain("输出实体引用:", text);
+    }
+
+    [Fact]
+    public void Summary_FeatureWithNoOutputs_StatesNoRef()
+    {
+        var snapshot = new NxContextSnapshot
+        {
+            Status = "available",
+            WorkPartName = "p",
+            Selection = new[]
+            {
+                new NxSelectionItem
+                {
+                    Kind = "feature",
+                    Feature = new NxFeatureInfo("Sketch", "S1", null, 0),
+                },
+            },
+        };
+        var text = snapshot.ToContextSummary();
+        Assert.Contains("无可解析的输出实体引用", text);
+        Assert.DoesNotContain("输出实体引用:", text);
+    }
 }
